@@ -13,17 +13,46 @@ from direct.task import Task
 from panda3d.core import AmbientLight
 from panda3d.core import Vec4
 from panda3d.core import LineSegs, NodePath
+from panda3d.core import Vec3
 
 from pandac.PandaModules import WindowProperties
+
+
+def procedural_grid(x_min, x_max, y_min, y_max, n):
+    del_x = (x_max - x_min) / n
+    del_y = (y_max - y_min) / n
+
+    lines = LineSegs()
+    # constant y lines
+    x0 = x_min
+    x1 = x_max
+    y0 = y_min
+    for i in range(0, n+1):
+        lines.moveTo(x0, y0, 0.1)
+        lines.draw_to(x1, y0, 0.1)
+        y0 += del_y
+
+    # constant x lines
+    y0 = y_min
+    y1 = y_max
+    x0 = x_min
+    for i in range(0, n+1):
+        lines.moveTo(x0, y0, 0.1)
+        lines.draw_to(x0, y1, 0.1)
+        x0 += del_x
+
+    return lines
 
 class MyApp(ShowBase):
     def __init__(self):
         ShowBase.__init__(self)
+
+        render.setDepthTest(False)
         base.setBackgroundColor(0, 0, 0)
         # base.disableMouse()
         props = WindowProperties()
-        props.setCursorHidden(True)
-        props.setMouseMode(WindowProperties.M_relative)
+        # props.setCursorHidden(True)
+        #props.setMouseMode(WindowProperties.M_relative)
         base.win.requestProperties(props)
         # Load the environment model.
         # self.scene = self.loader.loadModel("models/environment")
@@ -41,13 +70,13 @@ class MyApp(ShowBase):
 
         # Reparent the model to render.
         # self.tank.reparentTo(self.render)
-        self.ground.reparentTo(self.render)
+        # self.ground.reparentTo(self.render)
         # self.mountain_line.reparentTo(self.render)
         # self.mountain.reparentTo(self.render)
         # self.cube01.reparentTo(self.render)
         # self.pyramid.reparentTo(self.render)
         # Apply scale and position transforms on the model.
-        scale = 5
+        # scale = 5
         # self.tank.setScale(1, 1, 1)
         # self.cube01.setScale(scale, scale, scale)
         # self.pyramid.setScale(scale, scale, scale)
@@ -56,12 +85,12 @@ class MyApp(ShowBase):
 
         # render tanks
         self.tank.setPos(0, 0, 0)
-        tank1 = render.attachNewNode("Tank-Placeholder")
-        tank2 = render.attachNewNode("Tank-Placeholder")
-        tank1.setPos(100, 100, 0)
-        tank2.setPos(150, 70, 0)
-        self.tank.instanceTo(tank1)
-        self.tank.instanceTo(tank2)
+        self.tank1 = render.attachNewNode("Tank-Placeholder")
+        self.tank2 = render.attachNewNode("Tank-Placeholder")
+        self.tank1.setPos(100, 100, 0)
+        self.tank2.setPos(150, 70, 0)
+        self.tank.instanceTo(self.tank1)
+        self.tank.instanceTo(self.tank2)
 
         # self.cube01.setPos(20, 20, 0)
 
@@ -116,7 +145,7 @@ class MyApp(ShowBase):
                 idx1 = idx1 - 1
                 lines.drawTo(points[idx1][0], points[idx1][1], points[idx1][2])
 
-        lines.setThickness(4)
+        lines.setThickness(3)
         node = lines.create()
         self.np = NodePath(node)
         scale = 4000
@@ -127,10 +156,21 @@ class MyApp(ShowBase):
             # placeholder.setPos(sin(angleRadians), cos(angleRadians), 0)
             placeholder.setScale(scale, scale, scale/n/2)
             self.np.instanceTo(placeholder)
+        self.np.setColorScale(0, 1, 0, 1.0)
 
+        # grid
+        grid_lines = procedural_grid(-1000, 500, -1000, 500, 50)
+        grid_lines.setThickness(1)
+        node = grid_lines.create()
+        self.grid = NodePath(node)
+        self.grid.setColorScale(0.15, 0.2, 0.15, .9)
+        # self.grid.reparentTo(self.camera)
+        # self.grid.setPos(self.camera, 0, 0, -3)
+        self.grid.setPos(0, 0, -0.2)
+        self.grid.reparentTo(render)
 
         # np.set_color(0, 0, 1, 0)
-        self.np.setColorScale(0, 1, 0, 1.0)
+        # self.np.setColorScale(0, 1, 0, 1.0)
         # self.np.setScale(10, 10, 10)
         # self.np.setPos(70,0,0)
         # self.np.setH(self.np, 0)
@@ -144,15 +184,19 @@ class MyApp(ShowBase):
         #alightNP = self.render.attachNewNode(alight)
 
         # Add the spinCameraTask procedure to the task manager.
-        #self.taskMgr.add(self.spinCameraTask, "SpinCameraTask")
+        self.taskMgr.add(self.spinCameraTask, "SpinCameraTask")
 
     # Define a procedure to move the camera.
     def spinCameraTask(self, task):
         angleDegrees = task.time * 10.0
         angleRadians = angleDegrees * (pi / 180.0)
-        rad = 20
-        self.camera.setPos(rad * sin(angleRadians), rad * cos(angleRadians), 2)
-        self.camera.lookAt(self.tank, 0, 0, 0)
+        rad = 200
+        #self.camera.setPos(rad * sin(angleRadians), rad * cos(angleRadians), 4)
+        # self.camera.headsUp(self.tank1, Vec3(0, 0, 1))
+        pos = self.camera.getPos()
+        self.camera.setPos(pos[0],pos[1],4)
+        ort = self.camera.getHpr()
+        self.camera.setHpr(ort[0], 0, 0)
         # self.camera.setPos(100, 100, 0)
         # self.camera.setHpr(180-angleDegrees+10*sin(task.time), 0, 0)
         return Task.cont
