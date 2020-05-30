@@ -1,0 +1,153 @@
+<CoordinateSystem> { Z-up } 
+<Material> Material.004 {
+  <Scalar> baser { 0.800000011920929 }
+  <Scalar> baseg { 0.800000011920929 }
+  <Scalar> baseb { 0.800000011920929 }
+  <Scalar> basea { 1.0 }
+  <Scalar> emitr { 1 }
+  <Scalar> emitg { 1 }
+  <Scalar> emitb { 1 }
+  <Scalar> emita { 1 }
+  <Scalar> shininess { 0.5 }
+  <Scalar> roughness { 0.4000000059604645 }
+  <Scalar> metallic { 0.0 }
+  <Scalar> ior { 1.4500000476837158 }
+  <Scalar> local { 0 }
+}
+
+  <Group> Mountain {
+    <Transform> {
+      <Matrix4> {
+        1.0 0.0 0.0 0.0 
+        0.0 1.0 0.0 0.0 
+        0.0 0.0 0.9533678293228149 0.0 
+        0.0 6.18958182485585e-08 0.0 1.0 
+      }
+    }
+    
+    <VertexPool> Mountain {
+    
+      <Vertex> 0 {-0.049170 -0.453653 0.000000
+        <UV> UVMap {
+          0.250000 0.490000 
+        }
+        <RGBA> { 0 1 0 1 }
+      }
+      <Vertex> 1 {0.000000 0.000000 5.841195
+        <UV> UVMap {
+          0.250000 0.250000 
+        }
+        <RGBA> { 0 1 0 1 }
+      }
+      <Vertex> 2 {19.691925 0.000000 0.000000
+        <UV> UVMap {
+          0.490000 0.250000 
+        }
+        <RGBA> { 0 1 0 1 }
+      }
+      <Vertex> 3 {19.691925 0.000000 0.000000
+        <UV> UVMap {
+          0.490000 0.250000 
+        }
+        <RGBA> { 0 1 0 1 }
+      }
+      <Vertex> 4 {0.000000 0.000000 5.841195
+        <UV> UVMap {
+          0.250000 0.250000 
+        }
+        <RGBA> { 0 1 0 1 }
+      }
+      <Vertex> 5 {-0.049171 0.453653 0.000000
+        <UV> UVMap {
+          0.250000 0.010000 
+        }
+        <RGBA> { 0 1 0 1 }
+      }
+      <Vertex> 6 {-0.049171 0.453653 0.000000
+        <UV> UVMap {
+          0.250000 0.010000 
+        }
+        <RGBA> { 0 1 0 1 }
+      }
+      <Vertex> 7 {0.000000 0.000000 5.841195
+        <UV> UVMap {
+          0.250000 0.250000 
+        }
+        <RGBA> { 0 1 0 1 }
+      }
+      <Vertex> 8 {-19.790264 0.000000 0.000000
+        <UV> UVMap {
+          0.010000 0.250000 
+        }
+        <RGBA> { 0 1 0 1 }
+      }
+      <Vertex> 9 {-19.790264 0.000000 0.000000
+        <UV> UVMap {
+          0.010000 0.250000 
+        }
+        <RGBA> { 0 1 0 1 }
+      }
+      <Vertex> 10 {0.000000 0.000000 5.841195
+        <UV> UVMap {
+          0.250000 0.250000 
+        }
+        <RGBA> { 0 1 0 1 }
+      }
+      <Vertex> 11 {-0.049170 -0.453653 0.000000
+        <UV> UVMap {
+          0.250000 0.490000 
+        }
+        <RGBA> { 0 1 0 1 }
+      }
+      <Vertex> 12 {-0.049170 -0.453653 0.000000
+        <UV> UVMap {
+          0.750000 0.490000 
+        }
+        <RGBA> { 0 1 0 1 }
+      }
+      <Vertex> 13 {19.691925 0.000000 0.000000
+        <UV> UVMap {
+          0.990000 0.250000 
+        }
+        <RGBA> { 0 1 0 1 }
+      }
+      <Vertex> 14 {-0.049171 0.453653 0.000000
+        <UV> UVMap {
+          0.750000 0.010000 
+        }
+        <RGBA> { 0 1 0 1 }
+      }
+      <Vertex> 15 {-19.790264 0.000000 0.000000
+        <UV> UVMap {
+          0.510000 0.250000 
+        }
+        <RGBA> { 0 1 0 1 }
+      }}
+    
+    
+    <Polygon> {
+      <MRef> { Material.004 }
+      <Normal> {-0.022912 0.997022 -0.073638}
+      <VertexRef> { 0 1 2 <Ref> { Mountain }} 
+    }
+    <Polygon> {
+      <MRef> { Material.004 }
+      <Normal> {-0.022912 -0.997022 -0.073638}
+      <VertexRef> { 3 4 5 <Ref> { Mountain }} 
+    }
+    <Polygon> {
+      <MRef> { Material.004 }
+      <Normal> {0.022911 -0.996995 -0.074004}
+      <VertexRef> { 6 7 8 <Ref> { Mountain }} 
+    }
+    <Polygon> {
+      <MRef> { Material.004 }
+      <Normal> {0.022911 0.996995 -0.074004}
+      <VertexRef> { 9 10 11 <Ref> { Mountain }} 
+    }
+    <Polygon> {
+      <MRef> { Material.004 }
+      <Normal> {0.000000 0.000000 1.000000}
+      <VertexRef> { 12 13 14 15 <Ref> { Mountain }} 
+    }
+  }
