@@ -212,10 +212,39 @@ class MyApp(ShowBase):
         alight.setColor(Vec4(0, 0, 0, 0))  # ambient light is dim red
         # alightNP = self.render.attachNewNode(alight)
 
+        # render scope
+        scope_width = 0.3
+        scope_tick  = 0.1
+        scope_lower = -0.30
+        scope_upper = 0.30
+        scope_lines = LineSegs()
+        x0 = -scope_width/2
+        z0 = scope_tick
+        scope_lines.moveTo(x0, 0, z0 + scope_lower)
+        scope_lines.draw_to(x0, 0, 0 + scope_lower)
+        scope_lines.draw_to(x0 + scope_width, 0, 0 + scope_lower)
+        scope_lines.draw_to(x0 + scope_width, 0, z0 + scope_lower)
+        scope_lines.moveTo(0, 0, 0 + scope_lower)
+        scope_lines.draw_to(0, 0,0 + scope_lower - 0.2 )
+        #
+        scope_lines.moveTo(x0, 0, -z0 + scope_upper)
+        scope_lines.draw_to(x0, 0,  0 + scope_upper)
+        scope_lines.draw_to(x0 + scope_width, 0, 0 + scope_upper)
+        scope_lines.draw_to(x0 + scope_width, 0, -z0 + scope_upper)
+        scope_lines.moveTo(0, 0, 0 + scope_upper)
+        scope_lines.draw_to(0, 0, 0 + scope_upper + 0.2)
+
+        scope_lines.setThickness(3)
+        node = scope_lines.create()
+
+        self.scope = NodePath(node)
+        self.scope.setColorScale(0, 1, 0, .9)
+
+        self.scope.reparentTo(render2d)
+
         # Add the spinCameraTask procedure to the task manager.
         self.taskMgr.add(self.spinCameraTask, "SpinCameraTask")
-
-        self.taskMgr.add(self.moveTanksTask, "SpinCameraTask")
+        self.taskMgr.add(self.moveTanksTask, "MoveTanksTask")
 
     def moveTanksTask(self, task):
         Ax1 = 25;
