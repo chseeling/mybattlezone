@@ -82,6 +82,39 @@ def map_mountains(points, n):
         points_mapped.append([x, y, z])
     return points_mapped
 
+def procedural_sight(line_seg, lower_level, engaged):
+    sight_width = 0.3
+    sight_tick = 0.1
+    x0 = -sight_width / 2
+    z0 = sight_tick
+    sight_lower = -0.30
+    sight_upper = 0.30
+
+    if line_seg is None:
+        line_seg = LineSegs()
+
+    if lower_level:
+        sight_level = sight_lower
+        m = 1
+    else:
+        sight_level = sight_upper
+        m = -1
+    if engaged:
+        x_eng = 0.07
+        z_eng = 0.07
+    else:
+        x_eng = 0
+        z_eng = 0
+
+    line_seg.moveTo(x0 + x_eng, 0, m * z0 + sight_level + m * z_eng)
+    line_seg.draw_to(x0, 0, sight_level)
+    line_seg.draw_to(x0 + sight_width, 0, 0 + sight_level)
+    line_seg.draw_to(x0 + sight_width - x_eng, 0, m * z0 + sight_level + m * z_eng)
+    #
+    line_seg.moveTo(0, 0, 0 + sight_level)
+    line_seg.draw_to(0, 0, 0 + sight_level - m * 0.2)
+
+    return line_seg
 
 class MyApp(ShowBase):
     def __init__(self):
@@ -212,39 +245,48 @@ class MyApp(ShowBase):
         alight.setColor(Vec4(0, 0, 0, 0))  # ambient light is dim red
         # alightNP = self.render.attachNewNode(alight)
 
-        # render scope
-        scope_width = 0.3
-        scope_tick  = 0.1
-        scope_lower = -0.30
-        scope_upper = 0.30
-        scope_lines = LineSegs()
-        x0 = -scope_width/2
-        z0 = scope_tick
-        scope_lines.moveTo(x0, 0, z0 + scope_lower)
-        scope_lines.draw_to(x0, 0, 0 + scope_lower)
-        scope_lines.draw_to(x0 + scope_width, 0, 0 + scope_lower)
-        scope_lines.draw_to(x0 + scope_width, 0, z0 + scope_lower)
-        scope_lines.moveTo(0, 0, 0 + scope_lower)
-        scope_lines.draw_to(0, 0,0 + scope_lower - 0.2 )
-        #
-        scope_lines.moveTo(x0, 0, -z0 + scope_upper)
-        scope_lines.draw_to(x0, 0,  0 + scope_upper)
-        scope_lines.draw_to(x0 + scope_width, 0, 0 + scope_upper)
-        scope_lines.draw_to(x0 + scope_width, 0, -z0 + scope_upper)
-        scope_lines.moveTo(0, 0, 0 + scope_upper)
-        scope_lines.draw_to(0, 0, 0 + scope_upper + 0.2)
+        # render sight
+        sight_lower = -0.30
+        sight_upper = 0.30
 
-        scope_lines.setThickness(3)
-        node = scope_lines.create()
+        ls = procedural_sight(LineSegs(), True, False)
+        ls = procedural_sight(ls, False, False)
+        ls.setThickness(3)
+        self.sight_clear_node = ls.create()
 
-        self.scope = NodePath(node)
-        self.scope.setColorScale(0, 1, 0, .9)
+        ls = procedural_sight(LineSegs(), True, True)
+        ls = procedural_sight(ls, False, True)
+        ls.setThickness(3)
+        self.sight_engaged_node = ls.create()
 
-        self.scope.reparentTo(render2d)
+        self.sight_clear_np = NodePath(self.sight_clear_node)
+        self.sight_clear_np.setColorScale(0, 0.5, 0, .9)
+
+        self.sight_engaged_np = NodePath(self.sight_engaged_node)
+        self.sight_engaged_np.setColorScale(0, 1, 0, .9)
+
+        self.sight_clear_np.reparentTo(render2d)
+        self.sight_engaged_np.reparentTo(render2d)
+        self.sight_engaged_np.hide()
 
         # Add the spinCameraTask procedure to the task manager.
         self.taskMgr.add(self.spinCameraTask, "SpinCameraTask")
         self.taskMgr.add(self.moveTanksTask, "MoveTanksTask")
+
+        # base.messenger.toggleVerbose()
+
+        self.accept('space', self.shoot)
+        self.accept('space-up', self.shoot_clear)
+
+    def shoot(self):
+        self.sight_engaged_np.show()
+        self.sight_clear_np.hide()
+        return
+
+    def shoot_clear(self):
+        self.sight_engaged_np.hide()
+        self.sight_clear_np.show()
+        return
 
     def moveTanksTask(self, task):
         Ax1 = 25;
@@ -280,7 +322,7 @@ class MyApp(ShowBase):
         # self.camera.setPos(rad * sin(angleRadians), rad * cos(angleRadians), 4)
         # self.camera.headsUp(self.tank1, Vec3(0, 0, 1))
         pos = self.camera.getPos()
-        self.camera.setPos(pos[0], pos[1], 5)
+        self.camera.setPos(pos[0], pos[1], 2)
         ort = self.camera.getHpr()
         self.camera.setHpr(ort[0], 0, 0)
         # self.camera.setPos(100, 100, 0)
