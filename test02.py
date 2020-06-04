@@ -232,19 +232,19 @@ class MyApp(ShowBase):
         self.tank2.setPos(150, 70, 0)
         self.tank.instanceTo(self.tank1)
         self.tank.instanceTo(self.tank2)
-        self.tank1.setColorScale(0, 0.7, 0, 0.5)
-        self.tank2.setColorScale(1, 0.6, 0.1, 0.5)
+        self.tank1.setColorScale(0, 0.7, 0, 1.0)
+        self.tank2.setColorScale(1, 0.6, 0.1, 1.0)
 
         # grid
         grid_lines = procedural_grid(-1000, 500, -1000, 500, 50)
         grid_lines.setThickness(1)
         node = grid_lines.create()
         self.grid = NodePath(node)
-        self.grid.setColorScale(0.15, 0.2, 0.15, .9)
+        self.grid.setColorScale(0.15, 0.2, 0.15, 1.0)
         # self.grid.reparentTo(self.camera)
         # self.grid.setPos(self.camera, 0, 0, -3)
         self.grid.setPos(0, 0, -0.2)
-        self.grid.reparentTo(render)
+        # self.grid.reparentTo(render)
 
         # np.set_color(0, 0, 1, 0)
         # self.np.setColorScale(0, 1, 0, 1.0)
