@@ -1,4 +1,4 @@
-from panda3d.core import loadPrcFile
+from panda3d.core import loadPrcFile, AntialiasAttrib, KeyboardButton
 
 loadPrcFile("config/conf.prc")
 
@@ -11,12 +11,19 @@ from direct.showbase.ShowBase import ShowBase
 from direct.task import Task
 
 from panda3d.core import AmbientLight
-from panda3d.core import Vec4
+from panda3d.core import Vec4, Mat4
 from panda3d.core import LineSegs, NodePath
 from panda3d.core import Vec3
 
 from pandac.PandaModules import WindowProperties
 
+from direct.gui.OnscreenText import OnscreenText
+from direct.interval.LerpInterval import LerpPosInterval
+
+arrow_right   = KeyboardButton.right()
+arrow_left    = KeyboardButton.left()
+arrow_back    = KeyboardButton.down()
+arrow_forward = KeyboardButton.up()
 
 def procedural_grid(x_min, x_max, y_min, y_max, n):
     del_x = (x_max - x_min) / n
@@ -59,6 +66,7 @@ def draw_lines_object(data, idx_start=1):
             lines.drawTo(points[idx1][0], points[idx1][1], points[idx1][2])
     return lines
 
+
 # n : number of repeats on cylinder
 def map_mountains(points, n):
     # find range of x
@@ -82,13 +90,14 @@ def map_mountains(points, n):
         points_mapped.append([x, y, z])
     return points_mapped
 
+
 def procedural_sight(line_seg, lower_level, engaged):
-    sight_width = 0.3
+    sight_width = 0.25
     sight_tick = 0.1
     x0 = -sight_width / 2
     z0 = sight_tick
-    sight_lower = -0.30
-    sight_upper = 0.30
+    sight_lower = -0.23
+    sight_upper = 0.23
 
     if line_seg is None:
         line_seg = LineSegs()
@@ -110,19 +119,23 @@ def procedural_sight(line_seg, lower_level, engaged):
     line_seg.draw_to(x0, 0, sight_level)
     line_seg.draw_to(x0 + sight_width, 0, 0 + sight_level)
     line_seg.draw_to(x0 + sight_width - x_eng, 0, m * z0 + sight_level + m * z_eng)
-    #
+    # outer - central lines
     line_seg.moveTo(0, 0, 0 + sight_level)
-    line_seg.draw_to(0, 0, 0 + sight_level - m * 0.2)
+    line_seg.draw_to(0, 0, 0 + sight_level - m * 0.25)
 
     return line_seg
+
 
 class MyApp(ShowBase):
     def __init__(self):
         ShowBase.__init__(self)
 
-        render.setDepthTest(False)
+        # render.setDepthTest(False)
+        self.camLens.setFov(50)
+        render.setAntialias(AntialiasAttrib.MLine)
+
         base.setBackgroundColor(0, 0, 0)
-        # base.disableMouse()
+        base.disableMouse()
         props = WindowProperties()
         # props.setCursorHidden(True)
         # props.setMouseMode(WindowProperties.M_relative)
@@ -153,19 +166,8 @@ class MyApp(ShowBase):
         # self.tank.setScale(1, 1, 1)
         # self.cube01.setScale(scale, scale, scale)
         # self.pyramid.setScale(scale, scale, scale)
-        self.ground.setScale(50, 50, 1)
+        self.ground.setScale(100, 100, 1)
         self.mountain.setScale(30, 1, 30)
-
-        # old tanks method
-        # self.tank.setPos(0, 0, 0)
-        # self.tank1 = render.attachNewNode("Tank-Placeholder")
-        # self.tank2 = render.attachNewNode("Tank-Placeholder")
-        # self.tank1.setPos(100, 100, 0)
-        # self.tank2.setPos(150, 70, 0)
-        # self.tank.instanceTo(self.tank1)
-        # self.tank.instanceTo(self.tank2)
-
-        # self.cube01.setPos(20, 20, 0)
 
         # render mountains
         self.mountain_line.setPos(10, 0, 10)
@@ -179,6 +181,20 @@ class MyApp(ShowBase):
             placeholder.setH(placeholder, -i * 10)
             placeholder.setScale(0.4 + 0.6 * random(), 1, 0.1 + 3 * random())
             # self.mountain.instanceTo(placeholder)
+
+        # tank round
+        with open('models/tank_round.json', "r") as f:
+            data = json.load(f)
+        lines = draw_lines_object(data, 0)
+        lines.setThickness(2)
+        node = lines.create()
+        self.tank_round = NodePath(node)
+        self.tank_round.hide()
+        self.tank_round.setColorScale(0.4, 0.4, 1.0, 1.0)
+        self.tank_round.setPos(0, 20, -0.2)
+        self.tank_round.setHpr(self.tank_round, 0, 90, 0)
+        self.tank_round.setScale(0.2, 0.2, 0.2)
+        self.tank_round.reparentTo(camera)
 
         # new mountain method
         with open('models/digitization01_cleaned_02.json', "r") as f:
@@ -200,7 +216,7 @@ class MyApp(ShowBase):
             # placeholder.setPos(sin(angleRadians), cos(angleRadians), 0)
             placeholder.setScale(scale, scale, scale / n / 2.5)
             self.np.instanceTo(placeholder)
-        self.np.setColorScale(0, 0.7, 0, 0.5)
+        self.np.setColorScale(0, 0.7, 0, 1.0)
 
         # tank as lines
         with open('models/tankDesignB.json', "r") as f:
@@ -210,7 +226,6 @@ class MyApp(ShowBase):
         node = lines.create()
         self.tank = NodePath(node)
 
-        #self.tank.setPos(0, 0, 0)
         self.tank1 = render.attachNewNode("Tank-Placeholder")
         self.tank2 = render.attachNewNode("Tank-Placeholder")
         self.tank1.setPos(100, 100, 0)
@@ -272,15 +287,54 @@ class MyApp(ShowBase):
         # Add the spinCameraTask procedure to the task manager.
         self.taskMgr.add(self.spinCameraTask, "SpinCameraTask")
         self.taskMgr.add(self.moveTanksTask, "MoveTanksTask")
+        self.taskMgr.add(self.moveTask, "MoveTask")
 
         # base.messenger.toggleVerbose()
 
         self.accept('space', self.shoot)
         self.accept('space-up', self.shoot_clear)
+        self.accept('shot-done', self.reset_shot)
+
+        vect = self.camera.getHpr()
+        self.textObject = OnscreenText(text=str(vect[0]), pos=(-0.5, -0.9),
+                                       scale=(0.03, 0.05), fg=(0.4, 1.0, 0.4, 1), mayChange=True)
+        self.textObject.reparentTo(self.render2d)
+
+    def moveTask(self, task):
+        is_down = base.mouseWatcherNode.is_button_down
+
+        if is_down(arrow_right):
+            self.camera.setHpr(self.camera, -0.25, 0, 0)
+        if is_down(arrow_left):
+            self.camera.setHpr(self.camera,  0.25, 0, 0)
+        if is_down(arrow_back):
+            self.camera.setPos(self.camera, 0, -0.5, 0)
+        if is_down(arrow_forward):
+            self.camera.setPos(self.camera, 0,  0.5, 0)
+        return Task.cont
+
+    def reset_shot(self):
+        print('reset_shot')
+        self.tank_round.hide()
+        self.tank_round.reparentTo(self.camera)
+        self.tank_round.setPos(0, 20, -0.2)
+        self.tank_round.setHpr(0, 90, 0)
 
     def shoot(self):
         self.sight_engaged_np.show()
         self.sight_clear_np.hide()
+        # print('round', self.tank_round.getPos())
+        # print('camera',  self.camera.getPos(), self.camera.getHpr())
+        self.tank_round.wrtReparentTo(render)
+        # print(self.tank_round.getPos(), self.tank_round.getHpr())
+        ShootAt = render.getRelativeVector(base.camera, (0, 1, 0))
+        # self.tank_round.setPos(self.tank_round.getPos() + ShootAt)
+
+        self.tank_round.show()
+        i = LerpPosInterval(self.tank_round, 1, pos=(self.tank_round.getPos() + ShootAt * 200))
+        i.setDoneEvent('shot-done')
+        i.start()
+        print(ShootAt)
         return
 
     def shoot_clear(self):
@@ -291,8 +345,8 @@ class MyApp(ShowBase):
     def moveTanksTask(self, task):
         Ax1 = 25;
         Ay1 = 18
-        Bx1 = -0.1;
-        By1 = 0.2
+        Bx1 = -0.15;
+        By1 = 0.25
         x = Ax1 * sin(Bx1 * task.time) + 10
         y = Ay1 * sin(By1 * task.time)
         dx = Ax1 * Bx1 * cos(Bx1 * task.time)
@@ -303,8 +357,8 @@ class MyApp(ShowBase):
 
         Ax1 = 16;
         Ay1 = 18
-        Bx1 = 0.25;
-        By1 = 0.3
+        Bx1 = 0.3;
+        By1 = 0.35
         x = Ax1 * sin(Bx1 * task.time) + 20
         y = Ay1 * sin(By1 * task.time) + 3
         dx = Ax1 * Bx1 * cos(Bx1 * task.time)
@@ -325,6 +379,18 @@ class MyApp(ShowBase):
         self.camera.setPos(pos[0], pos[1], 2)
         ort = self.camera.getHpr()
         self.camera.setHpr(ort[0], 0, 0)
+
+        vectH = self.camera.getHpr()
+        vectP = self.camera.getPos()
+        rad = math.sqrt(vectP[0] ** 2 + vectP[1] ** 2)
+        theta = math.atan2(vectP[1], vectP[0]) * 180. / math.pi
+        self.textObject.text = str(int(vectH[0] + 180)) + ", " + str(int(rad)) + ", " + str(int(theta)) + ", " \
+                               + str(int(vectH[0] - theta))
+
+        mat = Mat4(self.camera.getMat())
+        mat.invertInPlace()
+        base.mouseInterfaceNode.setMat(mat)
+        # print(self.camera.getPos())
         # self.camera.setPos(100, 100, 0)
         # self.camera.setHpr(180-angleDegrees+10*sin(task.time), 0, 0)
         return Task.cont
