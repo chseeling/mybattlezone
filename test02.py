@@ -1,4 +1,5 @@
-from panda3d.core import loadPrcFile, AntialiasAttrib, KeyboardButton
+from panda3d.core import loadPrcFile, AntialiasAttrib, KeyboardButton, CollisionSphere, CollisionNode
+from panda3d.core import CollisionTraverser, CollisionHandlerEvent
 
 loadPrcFile("config/conf.prc")
 
@@ -182,16 +183,32 @@ class MyApp(ShowBase):
             placeholder.setScale(0.4 + 0.6 * random(), 1, 0.1 + 3 * random())
             # self.mountain.instanceTo(placeholder)
 
-        # tank round
+        # tank as lines
+        self.renderTanks()
+
+        # tank rounds
         with open('models/tank_round.json', "r") as f:
             data = json.load(f)
         lines = draw_lines_object(data, 0)
         lines.setThickness(2)
-        node = lines.create()
-        self.tank_round = NodePath(node)
-        self.tank_round.hide()
+
+        g_node = lines.create()
+        np = NodePath(g_node)
+        self.tank1_round = render.attachNewNode("tank1-round")
+        np.instanceTo(self.tank1_round)
+        self.tank1_round.setPos(-0.4, 0, 1.61325)
+        self.tank1_round.setHpr(self.tank1_round, 0, 0, 90)
+        self.tank1_round.setColorScale(0, 1, 0.0, 1.0)
+        self.tank1_round.setScale(0.14, 0.14, 0.14)
+        self.tank1_round.reparentTo(self.tank1)
+
+        np = NodePath(g_node)
+        g_node = lines.create()
+        self.tank_round = render.attachNewNode("tank-round")
+        np.instanceTo(self.tank_round)
+        # self.tank_round.hide()
         self.tank_round.setColorScale(0.4, 0.4, 1.0, 1.0)
-        self.tank_round.setPos(0, 20, -0.2)
+        self.tank_round.setPos(0, 20, -0.2 -10)
         self.tank_round.setHpr(self.tank_round, 0, 90, 0)
         self.tank_round.setScale(0.2, 0.2, 0.2)
         self.tank_round.reparentTo(camera)
@@ -218,22 +235,33 @@ class MyApp(ShowBase):
             self.np.instanceTo(placeholder)
         self.np.setColorScale(0, 0.7, 0, 1.0)
 
-        # tank as lines
-        with open('models/tankDesignB.json', "r") as f:
-            data = json.load(f)
-        lines = draw_lines_object(data, 0)
-        lines.setThickness(3)
-        node = lines.create()
-        self.tank = NodePath(node)
 
-        self.tank1 = render.attachNewNode("Tank-Placeholder")
-        self.tank2 = render.attachNewNode("Tank-Placeholder")
-        self.tank1.setPos(100, 100, 0)
-        self.tank2.setPos(150, 70, 0)
-        self.tank.instanceTo(self.tank1)
-        self.tank.instanceTo(self.tank2)
-        self.tank1.setColorScale(0, 0.7, 0, 1.0)
-        self.tank2.setColorScale(1, 0.6, 0.1, 1.0)
+        # collision
+        # Initialize Handler
+        self.collHandEvent = CollisionHandlerEvent()
+        self.collHandEvent.addInPattern('into-%in')
+
+        cs = CollisionSphere(0, 0, 0.8, 2.4)
+        cnodePath = self.tank1.attachNewNode(CollisionNode('cTank1'))
+        cnodePath.node().addSolid(cs)
+        # cnodePath.show()
+
+        #cs = CollisionSphere(0, 0, 0.8, 2.4)
+        cnodePath = self.tank2.attachNewNode(CollisionNode('cTank2'))
+        cnodePath.node().addSolid(cs)
+        # cnodePath.show()
+
+        cs = CollisionSphere(0, 0, 0, 1)
+        tr_cnodePath = self.tank_round.attachNewNode(CollisionNode('cTankRound'))
+        tr_cnodePath.node().addSolid(cs)
+        # cnodePath.show()
+
+        # Initialise Traverser
+        traverser = CollisionTraverser('Main Traverser')
+        traverser.showCollisions(render)
+        base.cTrav = traverser
+
+        traverser.addCollider(tr_cnodePath, self.collHandEvent)
 
         # grid
         grid_lines = procedural_grid(-1000, 500, -1000, 500, 50)
@@ -261,9 +289,6 @@ class MyApp(ShowBase):
         # alightNP = self.render.attachNewNode(alight)
 
         # render sight
-        sight_lower = -0.30
-        sight_upper = 0.30
-
         ls = procedural_sight(LineSegs(), True, False)
         ls = procedural_sight(ls, False, False)
         ls.setThickness(3)
@@ -275,10 +300,10 @@ class MyApp(ShowBase):
         self.sight_engaged_node = ls.create()
 
         self.sight_clear_np = NodePath(self.sight_clear_node)
-        self.sight_clear_np.setColorScale(0, 0.5, 0, .9)
+        self.sight_clear_np.setColorScale(0, 0.5, 0, 1.0)
 
         self.sight_engaged_np = NodePath(self.sight_engaged_node)
-        self.sight_engaged_np.setColorScale(0, 1, 0, .9)
+        self.sight_engaged_np.setColorScale(0, 1, 0, 1.0)
 
         self.sight_clear_np.reparentTo(render2d)
         self.sight_engaged_np.reparentTo(render2d)
@@ -294,11 +319,31 @@ class MyApp(ShowBase):
         self.accept('space', self.shoot)
         self.accept('space-up', self.shoot_clear)
         self.accept('shot-done', self.reset_shot)
+        self.accept('into-' + 'cTank2', self.tank_round_hit)
+        self.accept('into-' + 'cTank1', self.tank_round_hit)
 
         vect = self.camera.getHpr()
         self.textObject = OnscreenText(text=str(vect[0]), pos=(-0.5, -0.9),
                                        scale=(0.03, 0.05), fg=(0.4, 1.0, 0.4, 1), mayChange=True)
         self.textObject.reparentTo(self.render2d)
+
+    def renderTanks(self):
+        # tank as lines
+        with open('models/tankDesignB.json', "r") as f:
+            data = json.load(f)
+        lines = draw_lines_object(data, 0)
+        lines.setThickness(3)
+        node = lines.create()
+        self.tank = NodePath(node)
+
+        self.tank1 = render.attachNewNode("Tank-Placeholder")
+        self.tank2 = render.attachNewNode("Tank-Placeholder")
+        self.tank1.setPos(100, 100, 0)
+        self.tank2.setPos(150, 70, 0)
+        self.tank.instanceTo(self.tank1)
+        self.tank.instanceTo(self.tank2)
+        self.tank1.setColorScale(0, 0.7, 0, 1.0)
+        self.tank2.setColorScale(1, 0.6, 0.1, 1.0)
 
     def moveTask(self, task):
         is_down = base.mouseWatcherNode.is_button_down
@@ -317,10 +362,12 @@ class MyApp(ShowBase):
         print('reset_shot')
         self.tank_round.hide()
         self.tank_round.reparentTo(self.camera)
-        self.tank_round.setPos(0, 20, -0.2)
+        self.tank_round.setPos(0, 20, -0.2 - 10)
         self.tank_round.setHpr(0, 90, 0)
 
     def shoot(self):
+
+        self.tank_round.setPos(0, 20,  -0.2)
         self.sight_engaged_np.show()
         self.sight_clear_np.hide()
         # print('round', self.tank_round.getPos())
@@ -336,6 +383,9 @@ class MyApp(ShowBase):
         i.start()
         print(ShootAt)
         return
+
+    def tank_round_hit(self, entry):
+        print('tank round hit')
 
     def shoot_clear(self):
         self.sight_engaged_np.hide()
