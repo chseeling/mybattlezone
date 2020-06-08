@@ -166,29 +166,12 @@ class MyApp(ShowBase):
         # self.scene = self.loader.loadModel("models/environment")
         self.ground = self.loader.loadModel("models/ground_bl.egg")
         self.tank = self.loader.loadModel("models/tank_bl.egg")
-        self.mountain = self.loader.loadModel("models/mountain_bl.egg")
-        self.mountain_line = self.loader.loadModel("models/mountain_line.egg")
         # self.pyramid = self.loader.loadModel("models/pyramid01.bam")
         # self.cube01 = self.loader.loadModel("models/cube01.bam")
         self.tank.setRenderModeWireframe()
         self.ground.setRenderModeWireframe()
-        self.mountain.setRenderModeWireframe()
 
         self.ground.setScale(100, 100, 1)
-        self.mountain.setScale(30, 1, 30)
-
-        # render mountains
-        self.mountain_line.setPos(10, 0, 10)
-
-        # old mountain method
-        far_rad = 4000
-        for i in range(36):
-            angleRadians = (i * 10) * (pi / 180.0)
-            placeholder = render.attachNewNode("Mountain-Placeholder")
-            placeholder.setPos(far_rad * sin(angleRadians), far_rad * cos(angleRadians), 0)
-            placeholder.setH(placeholder, -i * 10)
-            placeholder.setScale(0.4 + 0.6 * random(), 1, 0.1 + 3 * random())
-            # self.mountain.instanceTo(placeholder)
 
         # tank as lines
         #   set up explosion variables
