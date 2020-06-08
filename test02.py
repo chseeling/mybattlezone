@@ -14,9 +14,9 @@ from direct.showbase.ShowBase import ShowBase
 from direct.task import Task
 
 from panda3d.core import AmbientLight
-from panda3d.core import Vec4, Mat4, Point3
+from panda3d.core import Vec4, Mat4, Point3, Point4
 from panda3d.core import LineSegs, NodePath
-from panda3d.core import Vec3
+from panda3d.core import LVecBase4
 
 from pandac.PandaModules import WindowProperties
 
@@ -27,7 +27,25 @@ arrow_right = KeyboardButton.right()
 arrow_left = KeyboardButton.left()
 arrow_back = KeyboardButton.down()
 arrow_forward = KeyboardButton.up()
+GG = LVecBase4(0, 1, 0, 1)  # game green constant
+NUMET = 2                   # number of enemy tanks
+tanks_dict = {"0": {},
+              "1": {"init_pos":     Point3(30, 50, 0),
+                    "color_scale":  Point4(0, 0.7, 0, 1.0),
+                    "move_params": {"Ax": 25, "Ay": 18, "Bx": -0.15, "By": 0.25, "phix": 10, "phiy": 0}
+                    },
+              "2": {"init_pos":     Point3(0, 50, 0),
+                    "color_scale":  Point4(1, 0.6, 0.1, 1.0),
+                    "move_params": {"Ax": 16, "Ay": 18, "Bx": 0.3, "By": 0.35, "phix": 20, "phiy": 3}
+                    },
+              "3": {"init_pos": Point3(-30, 40, 0),
+                    "color_scale": Point4(0.1, 0.6, 0.5, 1.0),
+                    "move_params": {"Ax": 16, "Ay": 18, "Bx": 0.3, "By": 0.35, "phix": -10, "phiy": 5}
+                    }
+              }
 
+tanks_list = {'1', '2', '3'}
+DEBUG = True
 
 def procedural_grid(x_min, x_max, y_min, y_max, n):
     del_x = (x_max - x_min) / n
@@ -155,19 +173,7 @@ class MyApp(ShowBase):
         self.tank.setRenderModeWireframe()
         self.ground.setRenderModeWireframe()
         self.mountain.setRenderModeWireframe()
-        # self.pyramid.setRenderModeWireframe()
 
-        # Reparent the model to render.
-        # self.tank.reparentTo(self.render)
-        # self.ground.reparentTo(self.render)
-        # self.mountain_line.reparentTo(self.render)
-        # self.mountain.reparentTo(self.render)
-        # self.pyramid.reparentTo(self.render)
-        # Apply scale and position transforms on the model.
-        # scale = 5
-        # self.tank.setScale(1, 1, 1)
-        # self.cube01.setScale(scale, scale, scale)
-        # self.pyramid.setScale(scale, scale, scale)
         self.ground.setScale(100, 100, 1)
         self.mountain.setScale(30, 1, 30)
 
@@ -186,11 +192,13 @@ class MyApp(ShowBase):
 
         # tank as lines
         #   set up explosion variables
-        self.tank1_explosion = Parallel(name="Tank1-Explosion")
-        self.tank2_explosion = Parallel(name="Tank2-Explosion")
+        for t in tanks_list:
+            tanks_dict[t]["explosion"] = Parallel(name="Tank{}-Explosion".format(t))
 
-        self.tanks = render.attachNewNode("Tanks")
-        self.renderTanks(self.tanks)
+
+        # group node for all enemy tanks
+        self.tank_group = render.attachNewNode("Tanks")
+        self.renderTanks(self.tank_group)
 
         # tank rounds
         with open('models/tank_round.json', "r") as f:
@@ -200,30 +208,26 @@ class MyApp(ShowBase):
 
         gn_round = lines.create()
         np_round = NodePath(gn_round)
-        # tank1 round
-        self.tank1_round = render.attachNewNode("tank1-round")
-        np_round.instanceTo(self.tank1_round)
-        self.tank1_round.setPos(-0.4, 0, 1.61325)
-        self.tank1_round.setHpr(self.tank1_round, 0, 0, 90)
-        self.tank1_round.setScale(0.14, 0.14, 0.14)
-        self.tank1_round.reparentTo(self.tank1)
-        # tank2 round
-        self.tank2_round = render.attachNewNode("tank2-round")
-        np_round.instanceTo(self.tank2_round)
-        self.tank2_round.setPos(-0.4, 0, 1.61325)
-        self.tank2_round.setHpr(self.tank2_round, 0, 0, 90)
-        self.tank2_round.setScale(0.14, 0.14, 0.14)
-        self.tank2_round.reparentTo(self.tank2)
 
+        self.tank_round = []
         #
-        self.tank_round = render.attachNewNode("tank-round")
-        np_round.instanceTo(self.tank_round)
-        # self.tank_round.hide()
-        self.tank_round.setColorScale(0.4, 0.4, 1.0, 1.0)
-        self.tank_round.setPos(0, 20, -0.2 - 10)
-        self.tank_round.setHpr(self.tank_round, 0, 90, 0)
-        self.tank_round.setScale(0.2, 0.2, 0.2)
-        self.tank_round.reparentTo(camera)
+        self.tank_round.append(render.attachNewNode("tank-round"))
+        np_round.instanceTo(self.tank_round[0])
+        # self.tank_round[0].hide()
+        self.tank_round[0].setColorScale(0.3, 0.3, 1.0, 1.0)
+        self.tank_round[0].setPos(0, 20, -0.2 - 10)
+        self.tank_round[0].setHpr(self.tank_round[0], 0, 90, 0)
+        self.tank_round[0].setScale(0.2, 0.2, 0.2)
+        self.tank_round[0].reparentTo(camera)
+
+        # enemy tank round
+        for t in tanks_list:
+            tanks_dict[t]["round"] = render.attachNewNode("tank{}-round".format(t))
+            np_round.instanceTo(tanks_dict[t]["round"])
+            tanks_dict[t]["round"].setPos(-0.4, 0, 1.61325)
+            tanks_dict[t]["round"].setHpr(tanks_dict[t]["round"], 0, 0, 90)
+            tanks_dict[t]["round"].setScale(0.14, 0.14, 0.14)
+            tanks_dict[t]["round"].reparentTo(tanks_dict[t]["tank"])
 
         # new mountain method
         with open('models/digitization01_cleaned_02.json', "r") as f:
@@ -253,23 +257,20 @@ class MyApp(ShowBase):
         self.collHandEvent.addInPattern('into-%in')
 
         cs = CollisionSphere(0, 0, 0.8, 2.4)
-        cnodePath = self.tank1.attachNewNode(CollisionNode('cTank1'))
-        cnodePath.node().addSolid(cs)
-        # cnodePath.show()
-
-        # cs = CollisionSphere(0, 0, 0.8, 2.4)
-        cnodePath = self.tank2.attachNewNode(CollisionNode('cTank2'))
-        cnodePath.node().addSolid(cs)
-        # cnodePath.show()
+        for t in tanks_list:
+            cnodePath = tanks_dict[t]["tank"].attachNewNode(CollisionNode('cTank' + t))
+            cnodePath.node().addSolid(cs)
+            # cnodePath.show()
 
         cs = CollisionSphere(0, 0, 0, 1)
-        tr_cnodePath = self.tank_round.attachNewNode(CollisionNode('cTankRound'))
+        tr_cnodePath = self.tank_round[0].attachNewNode(CollisionNode('cTankRound'))
         tr_cnodePath.node().addSolid(cs)
         # cnodePath.show()
 
         # Initialise Traverser
         traverser = CollisionTraverser('Main Traverser')
-        traverser.showCollisions(render)
+        if DEBUG:
+            traverser.showCollisions(render)
         base.cTrav = traverser
 
         traverser.addCollider(tr_cnodePath, self.collHandEvent)
@@ -283,17 +284,6 @@ class MyApp(ShowBase):
         # self.grid.reparentTo(self.camera)
         # self.grid.setPos(self.camera, 0, 0, -3)
         self.grid.setPos(0, 0, -0.2)
-        # self.grid.reparentTo(render)
-
-        # np.set_color(0, 0, 1, 0)
-        # self.np.setColorScale(0, 1, 0, 1.0)
-        # self.np.setScale(10, 10, 10)
-        # self.np.setPos(70,0,0)
-        # self.np.setH(self.np, 0)
-
-        # self.np.reparentTo(render)
-        # b = self.np.getTightBounds()
-        # print(b)
 
         alight = AmbientLight('ambientLight')
         alight.setColor(Vec4(0, 0, 0, 0))  # ambient light is dim red
@@ -314,15 +304,15 @@ class MyApp(ShowBase):
         self.sight_clear_np.setColorScale(0, 0.5, 0, 1.0)
 
         self.sight_engaged_np = NodePath(self.sight_engaged_node)
-        self.sight_engaged_np.setColorScale(0, 1, 0, 1.0)
+        self.sight_engaged_np.setColorScale(GG)
 
         self.sight_clear_np.reparentTo(render2d)
         self.sight_engaged_np.reparentTo(render2d)
         self.sight_engaged_np.hide()
 
         # Tasks
-        self.moveTank1 = False
-        self.moveTank2 = False
+        for t in tanks_list:
+            tanks_dict[t]["move"] = True
 
         self.taskMgr.add(self.spinCameraTask, "SpinCameraTask")
         self.taskMgr.add(self.moveTanksTask, "MoveTanksTask")
@@ -333,10 +323,10 @@ class MyApp(ShowBase):
         self.accept('space', self.shoot)
         self.accept('space-up', self.shoot_clear)
         self.accept('shot-done', self.reset_shot)
-        self.accept('into-' + 'cTank2', self.tank_round_hit)
-        self.accept('into-' + 'cTank1', self.tank_round_hit)
-        self.accept('explosion1-done', self.explosion_cleanup, extraArgs=[1])
-        self.accept('explosion2-done', self.explosion_cleanup, extraArgs=[2])
+
+        for t in tanks_list:
+            self.accept('into-' + 'cTank' + t, self.tank0_round_hit)
+            self.accept('explosion{}-done'.format(t), self.explosion_cleanup, extraArgs=[t])
 
         vect = self.camera.getHpr()
         self.textObject = OnscreenText(text=str(vect[0]), pos=(-0.5, -0.9),
@@ -344,28 +334,13 @@ class MyApp(ShowBase):
         self.textObject.reparentTo(self.render2d)
 
 
-
-        # self.tank1_explosion = ProjectileInterval(self.tank1_Frags, startPos=self.tank1_Frags.getPos(),
-        #                                          endZ=-0.1, startVel=Point3(2, 1, 25), name="explosion1")
-        # self.tank1_explosion.setDoneEvent('explosion1-done')
-
-        # self.tank2_explosion = ProjectileInterval(self.tank2_Frags, startPos=self.tank2_Frags.getPos(),
-        #                                          endZ=-0.1, startVel=Point3(2, 1, 25), name="explosion2")
-        # self.tank2_explosion.setDoneEvent('explosion2-done')
-
-    def explosion_cleanup(self, extra_arg):
-        if extra_arg == 1:
-            self.tank1_Frags.hide()
-            pos = self.tank1_Locator.getPos()
-            self.tank1_Locator.setPos(-pos[1], -pos[0], 0)
-            self.moveTank1 = True
-            self.tank1.show()
-        else:
-            self.tank2_Frags.hide()
-            pos = self.tank2_Locator.getPos()
-            self.tank2_Locator.setPos(-pos[1], -pos[0], 0)
-            self.moveTank2 = True
-            self.tank2.show()
+    def explosion_cleanup(self, t):
+        if t in tanks_list:
+            tanks_dict[t]["frags"].hide()
+            pos = tanks_dict[t]["Locator"].getPos()
+            tanks_dict[t]["Locator"].setPos(-pos[1], -pos[0], 0)
+            tanks_dict[t]["move"] = True
+            tanks_dict[t]["tank"].show()
 
     def renderTanks(self, tanks_group):
         # tank as lines
@@ -376,54 +351,32 @@ class MyApp(ShowBase):
         node = lines.create()
         self.tank = NodePath(node)
 
-        self.tank1_Locator = tanks_group.attachNewNode("Tank1-Locator")
-        self.tank2_Locator = tanks_group.attachNewNode("Tank2-Locator")
-        self.tank1 = self.tank1_Locator.attachNewNode("Tank1-Placeholder")
-        self.tank2 = self.tank2_Locator.attachNewNode("Tank2-Placeholder")
-        self.tank1_Locator.setPos(30, 50, 0)
-        self.tank2_Locator.setPos(0, 50, 0)
-        self.tank.instanceTo(self.tank1)
-        self.tank.instanceTo(self.tank2)
-        self.tank1.setColorScale(0, 0.7, 0, 1.0)
-        self.tank2.setColorScale(1, 0.6, 0.1, 1.0)
-
         # tank fragments
         with open('models/tank_frag_all.json', "r") as f:
             data = json.load(f)
 
-        self.tank1_Frags = self.tank1.attachNewNode("Tank1-Frags")
-        self.tank2_Frags = self.tank2.attachNewNode("Tank2-Frags")
+        for t in tanks_list:
+            tanks_dict[t]["Locator"] = tanks_group.attachNewNode("Tank{}-Locator".format(t))
+            tanks_dict[t]["tank"] = tanks_dict[t]["Locator"].attachNewNode("Tank{}-Placeholder".format(t))
+            tanks_dict[t]["Locator"].setPos(tanks_dict[t]["init_pos"])
+            tanks_dict[t]["tank"].setColorScale(tanks_dict[t]["color_scale"])
+            self.tank.instanceTo(tanks_dict[t]["tank"])
+            # frags
+            tanks_dict[t]["frags"] = tanks_dict[t]["tank"].attachNewNode("Tank{}-Frags".format(t))
+            for frag in data:
+                # print(frag["name"])
+                lines = create_lineSegs_object(frag["model"], 0, frag["name"])
+                lines.setThickness(3)
+                node = lines.create()
+                np = tanks_dict[t]["frags"].attachNewNode(node)
+                i = ProjectileInterval(np, startPos=np.getPos(), endZ=0,
+                                       startVel=Point3(5 * (1 - random()), 5 * (1 - random()), 30),
+                                       name="explosion{}".format(t))
+                tanks_dict[t]["explosion"].append(i)
+            tanks_dict[t]["frags"].hide()
+            tanks_dict[t]["explosion"].setDoneEvent('explosion{}-done'.format(t))
 
         # print(tanks_group.find("**/Tank1-Frags"))
-
-        # tank1 frags
-        for frag in data:
-            # print(frag["name"])
-            lines = create_lineSegs_object(frag["model"], 0, frag["name"])
-            lines.setThickness(3)
-            node = lines.create()
-            np = self.tank1_Frags.attachNewNode(node)
-            i = ProjectileInterval(np, startPos=np.getPos(), endZ= 0,
-                                   startVel=Point3(5*(1-random()), 5*(1-random()), 30),
-                                   name="explosion1")
-            self.tank1_explosion.append(i)
-        self.tank1_Frags.hide()
-        self.tank1_explosion.setDoneEvent('explosion1-done')
-        # tank2 frags
-        for frag in data:
-            # print(frag["name"])
-            lines = create_lineSegs_object(frag["model"], 0, frag["name"])
-            lines.setThickness(3)
-            node = lines.create()
-            np = self.tank2_Frags.attachNewNode(node)
-            print(np)
-            i = ProjectileInterval(np, startPos=np.getPos(), endZ= 0,
-                                   startVel=Point3(5*(1-random()), 5*(1-random()), 30),
-                                   name="explosion1")
-            self.tank2_explosion.append(i)
-        self.tank2_Frags.hide()
-        self.tank2_explosion.setDoneEvent('explosion2-done')
-
 
     def moveTask(self, task):
         is_down = base.mouseWatcherNode.is_button_down
@@ -440,44 +393,38 @@ class MyApp(ShowBase):
 
     def reset_shot(self):
         print('reset_shot')
-        self.tank_round.hide()
-        self.tank_round.reparentTo(self.camera)
-        self.tank_round.setPos(0, 20, -0.2 - 10)
-        self.tank_round.setHpr(0, 90, 0)
+        self.tank_round[0].hide()
+        self.tank_round[0].reparentTo(self.camera)
+        self.tank_round[0].setPos(0, 20, -0.2 - 10)
+        self.tank_round[0].setHpr(0, 90, 0)
 
     def shoot(self):
 
-        self.tank_round.setPos(0, 20, -0.2)
+        self.tank_round[0].setPos(0, 20, -0.2)
         self.sight_engaged_np.show()
         self.sight_clear_np.hide()
-        # print('round', self.tank_round.getPos())
+        # print('round', self.tank_round[0].getPos())
         # print('camera',  self.camera.getPos(), self.camera.getHpr())
-        self.tank_round.wrtReparentTo(render)
-        # print(self.tank_round.getPos(), self.tank_round.getHpr())
+        self.tank_round[0].wrtReparentTo(render)
+        # print(self.tank_round[0].getPos(), self.tank_round[0].getHpr())
         ShootAt = render.getRelativeVector(base.camera, (0, 1, 0))
-        # self.tank_round.setPos(self.tank_round.getPos() + ShootAt)
+        # self.tank_round[0].setPos(self.tank_round[0].getPos() + ShootAt)
 
-        self.tank_round.show()
-        i = LerpPosInterval(self.tank_round, 1, pos=(self.tank_round.getPos() + ShootAt * 200))
+        self.tank_round[0].show()
+        i = LerpPosInterval(self.tank_round[0], 1, pos=(self.tank_round[0].getPos() + ShootAt * 200))
         i.setDoneEvent('shot-done')
         i.start()
         print(ShootAt)
         return
 
-    def tank_round_hit(self, entry):
-
-        if entry.getIntoNodePath().node().name == 'cTank1':
-            print('hit tank 1')
-            self.moveTank1 = False
-            self.tank1.hide()
-            self.tank1_Frags.showThrough()
-            self.tank1_explosion.start()
-        elif entry.getIntoNodePath().node().name == 'cTank2':
-            print('hit tank 2')
-            self.moveTank2 = False
-            self.tank2.hide()
-            self.tank2_Frags.showThrough()
-            self.tank2_explosion.start()
+    def tank0_round_hit(self, entry):
+        if entry.getIntoNodePath().node().name[:5] == 'cTank':
+            t = entry.getIntoNodePath().node().name[5:6]
+            print('hit tank ' + t)
+            tanks_dict[t]["move"] = False
+            tanks_dict[t]["tank"].hide()
+            tanks_dict[t]["frags"].showThrough()
+            tanks_dict[t]["explosion"].start()
         else:
             print("hit something, but not a tank")
 
@@ -487,31 +434,24 @@ class MyApp(ShowBase):
         return
 
     def moveTanksTask(self, task):
-        if self.moveTank1:
-            Ax1 = 25;
-            Ay1 = 18
-            Bx1 = -0.15;
-            By1 = 0.25
-            x = Ax1 * sin(Bx1 * task.time) + 10
-            y = Ay1 * sin(By1 * task.time)
-            dx = Ax1 * Bx1 * cos(Bx1 * task.time)
-            dy = Ay1 * By1 * cos(By1 * task.time)
-            heading = math.degrees(math.atan2(dy, dx))
-            self.tank1.setPos(x, y, 0)
-            self.tank1.setH(heading)
 
-        if self.moveTank2:
-            Ax1 = 16;
-            Ay1 = 18
-            Bx1 = 0.3;
-            By1 = 0.35
-            x = Ax1 * sin(Bx1 * task.time) + 20
-            y = Ay1 * sin(By1 * task.time) + 3
-            dx = Ax1 * Bx1 * cos(Bx1 * task.time)
-            dy = Ay1 * By1 * cos(By1 * task.time)
-            heading = math.degrees(math.atan2(dy, dx))
-            self.tank2.setPos(x, y, 0)
-            self.tank2.setH(heading)
+        for t in tanks_list:
+            if tanks_dict[t]["move"]:
+                Ax = tanks_dict[t]["move_params"]["Ax"]
+                Ay = tanks_dict[t]["move_params"]["Ay"]
+                Bx = tanks_dict[t]["move_params"]["Bx"]
+                By = tanks_dict[t]["move_params"]["By"]
+                phix = tanks_dict[t]["move_params"]["phix"]
+                phiy = tanks_dict[t]["move_params"]["phiy"]
+                #
+                x = Ax * sin(Bx * task.time) + phix
+                y = Ay * sin(By * task.time) + phiy
+                dx = Ax * Bx * cos(Bx * task.time)
+                dy = Ay * By * cos(By * task.time)
+                heading = math.degrees(math.atan2(dy, dx))
+                tanks_dict[t]["tank"].setPos(x, y, 0)
+                tanks_dict[t]["tank"].setH(heading)
+
         return Task.cont
 
     # Define a procedure to move the camera.
@@ -520,7 +460,7 @@ class MyApp(ShowBase):
         angleRadians = angleDegrees * (pi / 180.0)
         rad = 200
         # self.camera.setPos(rad * sin(angleRadians), rad * cos(angleRadians), 4)
-        # self.camera.headsUp(self.tank1, Vec3(0, 0, 1))
+        # self.camera.headsUp(tanks_dict['1']["tank"], Vec3(0, 0, 1))
         pos = self.camera.getPos()
         self.camera.setPos(pos[0], pos[1], 2)
         ort = self.camera.getHpr()
