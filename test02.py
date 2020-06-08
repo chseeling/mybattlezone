@@ -28,24 +28,29 @@ arrow_left = KeyboardButton.left()
 arrow_back = KeyboardButton.down()
 arrow_forward = KeyboardButton.up()
 GG = LVecBase4(0, 1, 0, 1)  # game green constant
-NUMET = 2                   # number of enemy tanks
+camera_dict = {"turn_ang_vel": 0.25, "translate_vel": 0.5}
+NUMET = 2  # number of enemy tanks
 tanks_dict = {"0": {},
-              "1": {"init_pos":     Point3(30, 50, 0),
-                    "color_scale":  Point4(0, 0.7, 0, 1.0),
-                    "move_params": {"Ax": 25, "Ay": 18, "Bx": -0.15, "By": 0.25, "phix": 10, "phiy": 0}
+              "1": {"init_pos": Point3(30, 50, 0),
+                    "color_scale": Point4(0, 0.7, 0, 1.0),
+                    "move_params": {"Ax": 25, "Ay": 18, "Bx": -0.15, "By": 0.25, "phix": 10, "phiy": 0},
+                    "coll_rad": 1.4
                     },
-              "2": {"init_pos":     Point3(0, 50, 0),
-                    "color_scale":  Point4(1, 0.6, 0.1, 1.0),
-                    "move_params": {"Ax": 16, "Ay": 18, "Bx": 0.3, "By": 0.35, "phix": 20, "phiy": 3}
+              "2": {"init_pos": Point3(0, 50, 0),
+                    "color_scale": Point4(1, 0.6, 0.1, 1.0),
+                    "move_params": {"Ax": 16, "Ay": 18, "Bx": 0.3, "By": 0.35, "phix": 20, "phiy": 3},
+                    "coll_rad": 1.4
                     },
               "3": {"init_pos": Point3(-30, 40, 0),
                     "color_scale": Point4(0.1, 0.6, 0.5, 1.0),
-                    "move_params": {"Ax": 16, "Ay": 18, "Bx": 0.3, "By": 0.35, "phix": -10, "phiy": 5}
+                    "move_params": {"Ax": 16, "Ay": 18, "Bx": 0.3, "By": 0.35, "phix": -10, "phiy": 7},
+                    "coll_rad": 1.4
                     }
               }
 
 tanks_list = {'1', '2', '3'}
 DEBUG = True
+
 
 def procedural_grid(x_min, x_max, y_min, y_max, n):
     del_x = (x_max - x_min) / n
@@ -72,7 +77,6 @@ def procedural_grid(x_min, x_max, y_min, y_max, n):
 
     return lines
 
-
 def create_lineSegs_object(data, idx_start=1, name='lines_'):
     points = data['points']
     lines_def = data['lines']
@@ -87,7 +91,6 @@ def create_lineSegs_object(data, idx_start=1, name='lines_'):
             idx1 = idx1 - idx_start
             lines.drawTo(points[idx1][0], points[idx1][1], points[idx1][2])
     return lines
-
 
 # n : number of repeats on cylinder
 def map_mountains(points, n):
@@ -111,7 +114,6 @@ def map_mountains(points, n):
         z = point[2]
         points_mapped.append([x, y, z])
     return points_mapped
-
 
 def procedural_sight(line_seg, lower_level, engaged):
     sight_width = 0.25
@@ -160,24 +162,22 @@ class MyApp(ShowBase):
         base.disableMouse()
         props = WindowProperties()
         # props.setCursorHidden(True)
-        # props.setMouseMode(WindowProperties.M_relative)
         base.win.requestProperties(props)
-        # Load the environment model.
-        # self.scene = self.loader.loadModel("models/environment")
-        self.ground = self.loader.loadModel("models/ground_bl.egg")
-        self.tank = self.loader.loadModel("models/tank_bl.egg")
-        # self.pyramid = self.loader.loadModel("models/pyramid01.bam")
-        # self.cube01 = self.loader.loadModel("models/cube01.bam")
-        self.tank.setRenderModeWireframe()
-        self.ground.setRenderModeWireframe()
 
+        # Load the environment models
+        self.ground = self.loader.loadModel("models/ground_bl.egg")
+
+        self.tank = self.loader.loadModel("models/tank_bl.egg")
+        self.tank.setRenderModeWireframe()
+
+        self.ground.setRenderModeWireframe()
         self.ground.setScale(100, 100, 1)
 
         # tank as lines
         #   set up explosion variables
+        #   explosion intervals added in renderTanks() method
         for t in tanks_list:
             tanks_dict[t]["explosion"] = Parallel(name="Tank{}-Explosion".format(t))
-
 
         # group node for all enemy tanks
         self.tank_group = render.attachNewNode("Tanks")
@@ -203,7 +203,7 @@ class MyApp(ShowBase):
         self.tank_round[0].setScale(0.2, 0.2, 0.2)
         self.tank_round[0].reparentTo(camera)
 
-        # enemy tank round
+        # render enemy tank round
         for t in tanks_list:
             tanks_dict[t]["round"] = render.attachNewNode("tank{}-round".format(t))
             np_round.instanceTo(tanks_dict[t]["round"])
@@ -212,38 +212,22 @@ class MyApp(ShowBase):
             tanks_dict[t]["round"].setScale(0.14, 0.14, 0.14)
             tanks_dict[t]["round"].reparentTo(tanks_dict[t]["tank"])
 
+        #
         # new mountain method
-        with open('models/digitization01_cleaned_02.json', "r") as f:
-            data = json.load(f)
-
-        #   map mountain_line to a cylinder
-        n = 2  # number of repeats in circumference
-        data['points'] = map_mountains(data['points'], n)
-
-        lines = create_lineSegs_object(data, 1)
-        lines.setThickness(3)
-        node = lines.create()
-        self.np = NodePath(node)
-        scale = 7000
-        for i in range(n):
-            angleRadians = 2 * pi / n * i
-            placeholder = render.attachNewNode("MountainLine-Placeholder")
-            placeholder.setH(placeholder, 360 / n * i)
-            # placeholder.setPos(sin(angleRadians), cos(angleRadians), 0)
-            placeholder.setScale(scale, scale, scale / n / 2.5)
-            self.np.instanceTo(placeholder)
-        self.np.setColorScale(0, 0.7, 0, 1.0)
+        self.render_mountains()
 
         # collision
-        # Initialize Handler
+        # Initialize collision Handler
         self.collHandEvent = CollisionHandlerEvent()
         self.collHandEvent.addInPattern('into-%in')
 
-        cs = CollisionSphere(0, 0, 0.8, 2.4)
         for t in tanks_list:
+            cs = CollisionSphere(0, 0, 0.9, tanks_dict[t]["coll_rad"])
             cnodePath = tanks_dict[t]["tank"].attachNewNode(CollisionNode('cTank' + t))
             cnodePath.node().addSolid(cs)
-            # cnodePath.show()
+            if DEBUG:
+                # cnodePath.show()
+                pass
 
         cs = CollisionSphere(0, 0, 0, 1)
         tr_cnodePath = self.tank_round[0].attachNewNode(CollisionNode('cTankRound'))
@@ -264,8 +248,6 @@ class MyApp(ShowBase):
         node = grid_lines.create()
         self.grid = NodePath(node)
         self.grid.setColorScale(0.15, 0.2, 0.15, 1.0)
-        # self.grid.reparentTo(self.camera)
-        # self.grid.setPos(self.camera, 0, 0, -3)
         self.grid.setPos(0, 0, -0.2)
 
         alight = AmbientLight('ambientLight')
@@ -273,25 +255,7 @@ class MyApp(ShowBase):
         # alightNP = self.render.attachNewNode(alight)
 
         # render sight
-        ls = procedural_sight(LineSegs(), True, False)
-        ls = procedural_sight(ls, False, False)
-        ls.setThickness(3)
-        self.sight_clear_node = ls.create()
-
-        ls = procedural_sight(LineSegs(), True, True)
-        ls = procedural_sight(ls, False, True)
-        ls.setThickness(3)
-        self.sight_engaged_node = ls.create()
-
-        self.sight_clear_np = NodePath(self.sight_clear_node)
-        self.sight_clear_np.setColorScale(0, 0.5, 0, 1.0)
-
-        self.sight_engaged_np = NodePath(self.sight_engaged_node)
-        self.sight_engaged_np.setColorScale(GG)
-
-        self.sight_clear_np.reparentTo(render2d)
-        self.sight_engaged_np.reparentTo(render2d)
-        self.sight_engaged_np.hide()
+        self.render_sight()
 
         # Tasks
         for t in tanks_list:
@@ -311,11 +275,54 @@ class MyApp(ShowBase):
             self.accept('into-' + 'cTank' + t, self.tank0_round_hit)
             self.accept('explosion{}-done'.format(t), self.explosion_cleanup, extraArgs=[t])
 
+        # on-screen text
         vect = self.camera.getHpr()
         self.textObject = OnscreenText(text=str(vect[0]), pos=(-0.5, -0.9),
                                        scale=(0.03, 0.05), fg=(0.4, 1.0, 0.4, 1), mayChange=True)
         self.textObject.reparentTo(self.render2d)
 
+    def render_mountains(self):
+        with open('models/digitization01_cleaned_02.json', "r") as f:
+            data = json.load(f)
+
+        #   map mountain_line to a cylinder
+        n = 2  # number of repeats in circumference
+        data['points'] = map_mountains(data['points'], n)
+
+        lines = create_lineSegs_object(data, 1)
+        lines.setThickness(3)
+        node = lines.create()
+        np = NodePath(node)
+        scale = 7000
+        for i in range(n):
+            angleRadians = 2 * pi / n * i
+            placeholder = self.render.attachNewNode("MountainLine-Placeholder")
+            placeholder.setH(placeholder, 360 / n * i)
+            # placeholder.setPos(sin(angleRadians), cos(angleRadians), 0)
+            placeholder.setScale(scale, scale, scale / n / 2.5)
+            np.instanceTo(placeholder)
+        np.setColorScale(0, 0.7, 0, 1.0)
+
+    def render_sight(self):
+        ls = procedural_sight(LineSegs(), True, False)
+        ls = procedural_sight(ls, False, False)
+        ls.setThickness(3)
+        self.sight_clear_node = ls.create()
+
+        ls = procedural_sight(LineSegs(), True, True)
+        ls = procedural_sight(ls, False, True)
+        ls.setThickness(3)
+        self.sight_engaged_node = ls.create()
+
+        self.sight_clear_np = NodePath(self.sight_clear_node)
+        self.sight_clear_np.setColorScale(0, 0.5, 0, 1.0)
+
+        self.sight_engaged_np = NodePath(self.sight_engaged_node)
+        self.sight_engaged_np.setColorScale(GG)
+
+        self.sight_clear_np.reparentTo(render2d)
+        self.sight_engaged_np.reparentTo(render2d)
+        self.sight_engaged_np.hide()
 
     def explosion_cleanup(self, t):
         if t in tanks_list:
@@ -356,6 +363,9 @@ class MyApp(ShowBase):
                                        startVel=Point3(5 * (1 - random()), 5 * (1 - random()), 30),
                                        name="explosion{}".format(t))
                 tanks_dict[t]["explosion"].append(i)
+                i = LerpHprInterval(np, 2,hpr=(180*(1 - random()), 0, 0))
+                tanks_dict[t]["explosion"].append(i)
+
             tanks_dict[t]["frags"].hide()
             tanks_dict[t]["explosion"].setDoneEvent('explosion{}-done'.format(t))
 
@@ -365,17 +375,17 @@ class MyApp(ShowBase):
         is_down = base.mouseWatcherNode.is_button_down
 
         if is_down(arrow_right):
-            self.camera.setHpr(self.camera, -0.25, 0, 0)
+            self.camera.setHpr(self.camera, -camera_dict["turn_ang_vel"], 0, 0)
         if is_down(arrow_left):
-            self.camera.setHpr(self.camera, 0.25, 0, 0)
+            self.camera.setHpr(self.camera, camera_dict["turn_ang_vel"], 0, 0)
         if is_down(arrow_back):
-            self.camera.setPos(self.camera, 0, -0.5, 0)
+            self.camera.setPos(self.camera, 0, -camera_dict["translate_vel"], 0)
         if is_down(arrow_forward):
-            self.camera.setPos(self.camera, 0, 0.5, 0)
+            self.camera.setPos(self.camera, 0, camera_dict["translate_vel"], 0)
         return Task.cont
 
     def reset_shot(self):
-        print('reset_shot')
+        # print('reset_shot')
         self.tank_round[0].hide()
         self.tank_round[0].reparentTo(self.camera)
         self.tank_round[0].setPos(0, 20, -0.2 - 10)
@@ -397,7 +407,7 @@ class MyApp(ShowBase):
         i = LerpPosInterval(self.tank_round[0], 1, pos=(self.tank_round[0].getPos() + ShootAt * 200))
         i.setDoneEvent('shot-done')
         i.start()
-        print(ShootAt)
+        # print(ShootAt)
         return
 
     def tank0_round_hit(self, entry):
@@ -439,9 +449,9 @@ class MyApp(ShowBase):
 
     # Define a procedure to move the camera.
     def spinCameraTask(self, task):
-        angleDegrees = task.time * 10.0
-        angleRadians = angleDegrees * (pi / 180.0)
-        rad = 200
+        # angleDegrees = task.time * 10.0
+        # angleRadians = angleDegrees * (pi / 180.0)
+        # rad = 100
         # self.camera.setPos(rad * sin(angleRadians), rad * cos(angleRadians), 4)
         # self.camera.headsUp(tanks_dict['1']["tank"], Vec3(0, 0, 1))
         pos = self.camera.getPos()
@@ -454,11 +464,11 @@ class MyApp(ShowBase):
         rad = math.sqrt(vectP[0] ** 2 + vectP[1] ** 2)
         theta = math.atan2(vectP[1], vectP[0]) * 180. / math.pi
         self.textObject.text = str(int(vectH[0] + 180)) + ", " + str(int(rad)) + ", " + str(int(theta)) + ", " \
-                               + str(int(vectH[0] - theta))
+                             + str(int(vectH[0] - theta))
 
-        mat = Mat4(self.camera.getMat())
-        mat.invertInPlace()
-        base.mouseInterfaceNode.setMat(mat)
+        # mat = Mat4(self.camera.getMat())
+        # mat.invertInPlace()
+        # base.mouseInterfaceNode.setMat(mat)
         # print(self.camera.getPos())
         # self.camera.setPos(100, 100, 0)
         # self.camera.setHpr(180-angleDegrees+10*sin(task.time), 0, 0)
