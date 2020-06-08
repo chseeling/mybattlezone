@@ -16,7 +16,7 @@ from direct.task import Task
 from panda3d.core import AmbientLight
 from panda3d.core import Vec4, Mat4, Point3, Point4
 from panda3d.core import LineSegs, NodePath
-from panda3d.core import LVecBase4
+from panda3d.core import LVecBase4, LVecBase2d
 
 from pandac.PandaModules import WindowProperties
 
@@ -34,17 +34,20 @@ tanks_dict = {"0": {},
               "1": {"init_pos": Point3(30, 50, 0),
                     "color_scale": Point4(0, 0.7, 0, 1.0),
                     "move_params": {"Ax": 25, "Ay": 18, "Bx": -0.15, "By": 0.25, "phix": 10, "phiy": 0},
-                    "coll_rad": 1.4
+                    "coll_rad": 1.4,
+                    "shooting": False
                     },
               "2": {"init_pos": Point3(0, 50, 0),
                     "color_scale": Point4(1, 0.6, 0.1, 1.0),
                     "move_params": {"Ax": 16, "Ay": 18, "Bx": 0.3, "By": 0.35, "phix": 20, "phiy": 3},
-                    "coll_rad": 1.4
+                    "coll_rad": 1.4,
+                    "shooting": False
                     },
               "3": {"init_pos": Point3(-30, 40, 0),
                     "color_scale": Point4(0.1, 0.6, 0.5, 1.0),
                     "move_params": {"Ax": 16, "Ay": 18, "Bx": 0.3, "By": 0.35, "phix": -10, "phiy": 7},
-                    "coll_rad": 1.4
+                    "coll_rad": 1.4,
+                    "shooting": False
                     }
               }
 
@@ -264,22 +267,38 @@ class MyApp(ShowBase):
         self.taskMgr.add(self.spinCameraTask, "SpinCameraTask")
         self.taskMgr.add(self.moveTanksTask, "MoveTanksTask")
         self.taskMgr.add(self.moveTask, "MoveTask")
+        self.taskMgr.add(self.enemy_shoot_task, "EnemyShoot")
 
         # base.messenger.toggleVerbose()
 
         self.accept('space', self.shoot)
-        self.accept('space-up', self.shoot_clear)
+        self.accept('space-up', self.shot_clear)
         self.accept('shot-done', self.reset_shot)
 
         for t in tanks_list:
             self.accept('into-' + 'cTank' + t, self.tank0_round_hit)
             self.accept('explosion{}-done'.format(t), self.explosion_cleanup, extraArgs=[t])
+            self.accept('shot{}-done'.format(t), self.enemy_reset_shot, extraArgs=[t])
 
         # on-screen text
         vect = self.camera.getHpr()
         self.textObject = OnscreenText(text=str(vect[0]), pos=(-0.5, -0.9),
                                        scale=(0.03, 0.05), fg=(0.4, 1.0, 0.4, 1), mayChange=True)
         self.textObject.reparentTo(self.render2d)
+
+    def enemy_shoot_task(self, task):
+        for t in tanks_list:
+            ShootAt = tanks_dict[t]["tank"].getRelativePoint(self.camera, (0, 0, 0))
+            ShootAt = LVecBase2d(ShootAt[0], ShootAt[1]).normalized()
+            if ShootAt[0] > 0.9999 and not tanks_dict[t]["shooting"]:
+                print('Tank {} shooting'.format(t))
+                tanks_dict[t]["shooting"] = True
+                tanks_dict[t]["round"].wrtReparentTo(render)
+                ShootAt = render.getRelativeVector(tanks_dict[t]["tank"], (1, 0, 0))
+                i = LerpPosInterval(tanks_dict[t]["round"], 1, pos=(tanks_dict[t]["round"].getPos() + ShootAt * 200))
+                i.setDoneEvent('shot{}-done'.format(t))
+                i.start()
+        return Task.cont
 
     def render_mountains(self):
         with open('models/digitization01_cleaned_02.json', "r") as f:
@@ -363,7 +382,7 @@ class MyApp(ShowBase):
                                        startVel=Point3(5 * (1 - random()), 5 * (1 - random()), 30),
                                        name="explosion{}".format(t))
                 tanks_dict[t]["explosion"].append(i)
-                i = LerpHprInterval(np, 2,hpr=(180*(1 - random()), 0, 0))
+                i = LerpHprInterval(np, 2, hpr=(180*(1 - random()), 0, 0))
                 tanks_dict[t]["explosion"].append(i)
 
             tanks_dict[t]["frags"].hide()
@@ -391,13 +410,19 @@ class MyApp(ShowBase):
         self.tank_round[0].setPos(0, 20, -0.2 - 10)
         self.tank_round[0].setHpr(0, 90, 0)
 
+    def enemy_reset_shot(self, t):
+        print("reset shot {}".format(t))
+        tanks_dict[t]["round"].reparentTo(tanks_dict[t]["tank"])
+        tanks_dict[t]["round"].setPos(-0.4, 0, 1.61325)
+        tanks_dict[t]["round"].setHpr(0, 0, 90)
+        tanks_dict[t]["shooting"] = False
+
     def shoot(self):
 
         self.tank_round[0].setPos(0, 20, -0.2)
         self.sight_engaged_np.show()
         self.sight_clear_np.hide()
-        # print('round', self.tank_round[0].getPos())
-        # print('camera',  self.camera.getPos(), self.camera.getHpr())
+
         self.tank_round[0].wrtReparentTo(render)
         # print(self.tank_round[0].getPos(), self.tank_round[0].getHpr())
         ShootAt = render.getRelativeVector(base.camera, (0, 1, 0))
@@ -421,7 +446,7 @@ class MyApp(ShowBase):
         else:
             print("hit something, but not a tank")
 
-    def shoot_clear(self):
+    def shot_clear(self):
         self.sight_engaged_np.hide()
         self.sight_clear_np.show()
         return
