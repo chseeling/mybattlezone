@@ -14,14 +14,16 @@ from direct.showbase.ShowBase import ShowBase
 from direct.task import Task
 
 from panda3d.core import AmbientLight
-from panda3d.core import Vec4, Mat4, Point3, Point4
+from panda3d.core import Vec4, Mat4, Point3, Point4, BitMask32
 from panda3d.core import LineSegs, NodePath
-from panda3d.core import LVecBase4, LVecBase2d
+from panda3d.core import LVecBase4, LVecBase2d, InputDevice
 
 from pandac.PandaModules import WindowProperties
 
 from direct.gui.OnscreenText import OnscreenText
 from direct.interval.LerpInterval import LerpPosInterval
+
+
 
 arrow_right = KeyboardButton.right()
 arrow_left = KeyboardButton.left()
@@ -157,6 +159,12 @@ class MyApp(ShowBase):
     def __init__(self):
         ShowBase.__init__(self)
 
+        device_list = self.devices.getDevices()
+        for device in device_list:
+            print(device.device_class)
+            if device.device_class == DeviceClass.flight_stick:
+                print("Have Joy stick")
+
         # render.setDepthTest(False)
         self.camLens.setFov(50)
         render.setAntialias(AntialiasAttrib.MLine)
@@ -219,23 +227,48 @@ class MyApp(ShowBase):
         # new mountain method
         self.render_mountains()
 
-        # collision
+        ####################
+        # collisions       #
+        ####################
+        print(CollisionNode.getDefaultCollideMask())
+
         # Initialize collision Handler
         self.collHandEvent = CollisionHandlerEvent()
         self.collHandEvent.addInPattern('into-%in')
 
+        # collision spheres enemy tank
         for t in tanks_list:
             cs = CollisionSphere(0, 0, 0.9, tanks_dict[t]["coll_rad"])
             cnodePath = tanks_dict[t]["tank"].attachNewNode(CollisionNode('cTank' + t))
             cnodePath.node().addSolid(cs)
-            if DEBUG:
-                # cnodePath.show()
-                pass
 
+            if DEBUG:
+                cnodePath.show()
+                pass
+        self.tank_group.setCollideMask(BitMask32(0x10))
+
+
+        # print(self.tank_group.getCollideMask())
+        # print(tanks_dict['1']["tank"].getCollideMask())
+
+        # collision sphere for round of main tank
         cs = CollisionSphere(0, 0, 0, 1)
         tr_cnodePath = self.tank_round[0].attachNewNode(CollisionNode('cTankRound'))
         tr_cnodePath.node().addSolid(cs)
-        # cnodePath.show()
+
+        # collision spheres for enemy tank rounds
+        cs = CollisionSphere(0, 0, 0, 1)
+        for t in tanks_list:
+            np = tanks_dict[t]["round"].attachNewNode(CollisionNode('ceTankRound' + t))
+            np.node().addSolid(cs)
+            np.node().setFromCollideMask(BitMask32(0x20))
+            # np.show()
+
+        # collision sphere main tank
+        cs = CollisionSphere(0, 0, 0, 1)
+        np = self.camera.attachNewNode(CollisionNode('cmTank'))
+        np.node().addSolid(cs)
+        # np.show()
 
         # Initialise Traverser
         traverser = CollisionTraverser('Main Traverser')
@@ -243,7 +276,14 @@ class MyApp(ShowBase):
             traverser.showCollisions(render)
         base.cTrav = traverser
 
+
+        # from objects
         traverser.addCollider(tr_cnodePath, self.collHandEvent)
+
+        np_list = render.findAllMatches("**/ceTankRound*")
+        for np in np_list:
+            traverser.addCollider(np, self.collHandEvent)
+
 
         # grid
         grid_lines = procedural_grid(-1000, 500, -1000, 500, 50)
@@ -275,6 +315,7 @@ class MyApp(ShowBase):
         self.accept('space-up', self.shot_clear)
         self.accept('shot-done', self.reset_shot)
 
+        self.accept('into-' + 'cmTank', self.struck)
         for t in tanks_list:
             self.accept('into-' + 'cTank' + t, self.tank0_round_hit)
             self.accept('explosion{}-done'.format(t), self.explosion_cleanup, extraArgs=[t])
@@ -286,16 +327,19 @@ class MyApp(ShowBase):
                                        scale=(0.03, 0.05), fg=(0.4, 1.0, 0.4, 1), mayChange=True)
         self.textObject.reparentTo(self.render2d)
 
+    def struck(self, entry):
+        print("struck")
+
     def enemy_shoot_task(self, task):
         for t in tanks_list:
-            ShootAt = tanks_dict[t]["tank"].getRelativePoint(self.camera, (0, 0, 0))
+            ShootAt = tanks_dict[t]["tank"].getRelativePoint(self.camera, (0 + random(), 0 + random(), 0 + random()))
             ShootAt = LVecBase2d(ShootAt[0], ShootAt[1]).normalized()
-            if ShootAt[0] > 0.9999 and not tanks_dict[t]["shooting"]:
+            if ShootAt[0] > 0.99999 and not tanks_dict[t]["shooting"]:
                 print('Tank {} shooting'.format(t))
                 tanks_dict[t]["shooting"] = True
                 tanks_dict[t]["round"].wrtReparentTo(render)
                 ShootAt = render.getRelativeVector(tanks_dict[t]["tank"], (1, 0, 0))
-                i = LerpPosInterval(tanks_dict[t]["round"], 1, pos=(tanks_dict[t]["round"].getPos() + ShootAt * 200))
+                i = LerpPosInterval(tanks_dict[t]["round"], 1, pos=(tanks_dict[t]["round"].getPos() + ShootAt * 300))
                 i.setDoneEvent('shot{}-done'.format(t))
                 i.start()
         return Task.cont
@@ -411,7 +455,7 @@ class MyApp(ShowBase):
         self.tank_round[0].setHpr(0, 90, 0)
 
     def enemy_reset_shot(self, t):
-        print("reset shot {}".format(t))
+        # print("reset shot {}".format(t))
         tanks_dict[t]["round"].reparentTo(tanks_dict[t]["tank"])
         tanks_dict[t]["round"].setPos(-0.4, 0, 1.61325)
         tanks_dict[t]["round"].setHpr(0, 0, 90)
@@ -429,7 +473,7 @@ class MyApp(ShowBase):
         # self.tank_round[0].setPos(self.tank_round[0].getPos() + ShootAt)
 
         self.tank_round[0].show()
-        i = LerpPosInterval(self.tank_round[0], 1, pos=(self.tank_round[0].getPos() + ShootAt * 200))
+        i = LerpPosInterval(self.tank_round[0], 1.1, pos=(self.tank_round[0].getPos() + ShootAt * 200))
         i.setDoneEvent('shot-done')
         i.start()
         # print(ShootAt)
