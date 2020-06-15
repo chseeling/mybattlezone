@@ -159,6 +159,11 @@ class MyApp(ShowBase):
     def __init__(self):
         ShowBase.__init__(self)
 
+        mySound = base.loader.loadSfx("sfx/tank_with_radar.ogg")
+        self.mainShot_snd = base.loader.loadSfx("sfx/mainShot.ogg")
+        self.enemyShot_snd = base.loader.loadSfx("sfx/enemyShot.ogg")
+        self.enemyTankExplosion_snd = base.loader.loadSfx("sfx/enemyTankExplosion.ogg")
+
         device_list = self.devices.getDevices()
         for device in device_list:
             print(device.device_class)
@@ -243,7 +248,7 @@ class MyApp(ShowBase):
             cnodePath.node().addSolid(cs)
 
             if DEBUG:
-                cnodePath.show()
+                # cnodePath.show()
                 pass
         self.tank_group.setCollideMask(BitMask32(0x10))
 
@@ -327,6 +332,13 @@ class MyApp(ShowBase):
                                        scale=(0.03, 0.05), fg=(0.4, 1.0, 0.4, 1), mayChange=True)
         self.textObject.reparentTo(self.render2d)
 
+        mySound.setLoop(True)
+        mySound.play()
+
+        # mainShot_snd.setLoop(True)
+
+        # sfxMgr = base.sfxManagerList[0]
+
     def struck(self, entry):
         print("struck")
 
@@ -342,6 +354,7 @@ class MyApp(ShowBase):
                 i = LerpPosInterval(tanks_dict[t]["round"], 1, pos=(tanks_dict[t]["round"].getPos() + ShootAt * 300))
                 i.setDoneEvent('shot{}-done'.format(t))
                 i.start()
+                self.enemyShot_snd.play()
         return Task.cont
 
     def render_mountains(self):
@@ -473,6 +486,7 @@ class MyApp(ShowBase):
         # self.tank_round[0].setPos(self.tank_round[0].getPos() + ShootAt)
 
         self.tank_round[0].show()
+        self.mainShot_snd.play()
         i = LerpPosInterval(self.tank_round[0], 1.1, pos=(self.tank_round[0].getPos() + ShootAt * 200))
         i.setDoneEvent('shot-done')
         i.start()
@@ -487,6 +501,7 @@ class MyApp(ShowBase):
             tanks_dict[t]["tank"].hide()
             tanks_dict[t]["frags"].showThrough()
             tanks_dict[t]["explosion"].start()
+            self.enemyTankExplosion_snd.play()
         else:
             print("hit something, but not a tank")
 
