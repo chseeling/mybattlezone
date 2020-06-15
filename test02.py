@@ -167,8 +167,8 @@ class MyApp(ShowBase):
         device_list = self.devices.getDevices()
         for device in device_list:
             print(device.device_class)
-            if device.device_class == DeviceClass.flight_stick:
-                print("Have Joy stick")
+            # if device.device_class == DeviceClass.flight_stick:
+            #    print("Have Joy stick")
 
         # render.setDepthTest(False)
         self.camLens.setFov(50)
