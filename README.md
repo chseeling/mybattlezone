@@ -4,6 +4,6 @@
 ## Linux 
 
 ```
-cd mybattlecone
+cd mybattlezone
 python3 test02.py
 ```
