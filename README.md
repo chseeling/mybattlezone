@@ -31,7 +31,7 @@ Or from PowerShell on Windows:
 ## Controls
 
 - Arrow keys: move and turn
-- Space: fire
+- Space, F, Ctrl, or left mouse: fire
 - B: toggle bloom
 - R: restart after game over
 

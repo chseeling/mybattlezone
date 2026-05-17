@@ -442,6 +442,12 @@ class MyApp(ShowBase):
         self.bloom_enabled = True
         self.accept('space', self.shoot)
         self.accept('space-up', self.shot_clear)
+        self.accept('f', self.shoot)
+        self.accept('f-up', self.shot_clear)
+        self.accept('mouse1', self.shoot)
+        self.accept('mouse1-up', self.shot_clear)
+        self.accept('control', self.shoot)
+        self.accept('control-up', self.shot_clear)
         self.accept('shot-done', self.reset_shot)
         self.accept('b', self.toggle_bloom)
         self.accept('r', self.restart_game)
