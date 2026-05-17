@@ -16,7 +16,7 @@ from direct.task import Task
 
 from panda3d.core import AmbientLight
 from panda3d.core import Vec4, Mat4, Point3, Point4, BitMask32
-from panda3d.core import LineSegs, NodePath, TransparencyAttrib, ColorBlendAttrib, TextNode, ClockObject
+from panda3d.core import LineSegs, NodePath, TransparencyAttrib, ColorBlendAttrib, TextNode, ClockObject, CardMaker
 from panda3d.core import Geom, GeomNode, GeomTriangles, GeomVertexData, GeomVertexFormat, GeomVertexWriter
 from panda3d.core import LVecBase4, LVecBase2d, InputDevice, WindowProperties
 
@@ -68,6 +68,9 @@ RADAR_SWEEP_SLICE_ALPHA = 0.16
 RADAR_SCAN_WIDTH_DEGREES = 6
 RADAR_BLIP_FADE_SECONDS = 1.6
 RADAR_BLIP_IDLE_ALPHA = 0.03
+PLAYER_MAX_LIVES = 3
+PLAYER_HIT_COOLDOWN = 1.2
+PLAYER_FLASH_SECONDS = 0.45
 RADAR_SWEEP_TRAILS = (
     (0, 0.55, 2),
     (28, 0.10, 1),
@@ -269,10 +272,11 @@ class MyApp(ShowBase):
     def __init__(self):
         ShowBase.__init__(self)
 
-        mySound = base.loader.loadSfx("sfx/tank_with_radar.ogg")
+        self.ambient_snd = base.loader.loadSfx("sfx/tank_with_radar.ogg")
         self.mainShot_snd = base.loader.loadSfx("sfx/mainShot.ogg")
         self.enemyShot_snd = base.loader.loadSfx("sfx/enemyShot.ogg")
         self.enemyTankExplosion_snd = base.loader.loadSfx("sfx/enemyTankExplosion.ogg")
+        self.gameOver_snd = base.loader.loadSfx("sfx/gameOver.wav")
 
         if DEBUG:
             device_list = self.devices.getDevices()
@@ -420,6 +424,7 @@ class MyApp(ShowBase):
         # render sight
         self.render_sight()
         self.render_radar()
+        self.render_player_hud()
 
         # Tasks
         for t in tanks_list:
@@ -430,6 +435,7 @@ class MyApp(ShowBase):
         self.taskMgr.add(self.moveTask, "MoveTask")
         self.taskMgr.add(self.enemy_shoot_task, "EnemyShoot")
         self.taskMgr.add(self.updateRadarTask, "UpdateRadarTask")
+        self.taskMgr.add(self.updatePlayerFeedbackTask, "UpdatePlayerFeedbackTask")
 
         # base.messenger.toggleVerbose()
 
@@ -438,6 +444,7 @@ class MyApp(ShowBase):
         self.accept('space-up', self.shot_clear)
         self.accept('shot-done', self.reset_shot)
         self.accept('b', self.toggle_bloom)
+        self.accept('r', self.restart_game)
 
         self.accept('into-' + 'cmTank', self.struck)
         for t in tanks_list:
@@ -456,8 +463,8 @@ class MyApp(ShowBase):
         self.bloomTextObject.reparentTo(self.render2d)
         self.set_bloom_enabled(self.bloom_enabled)
 
-        mySound.setLoop(True)
-        mySound.play()
+        self.ambient_snd.setLoop(True)
+        self.ambient_snd.play()
 
         # mainShot_snd.setLoop(True)
 
@@ -484,9 +491,71 @@ class MyApp(ShowBase):
         self.set_bloom_enabled(not self.bloom_enabled)
 
     def struck(self, entry):
-        print("struck")
+        now = ClockObject.getGlobalClock().getFrameTime()
+        if self.game_over or now - self.last_player_hit_time < PLAYER_HIT_COOLDOWN:
+            return
+
+        from_name = entry.getFromNodePath().node().name
+        if from_name.startswith("ceTankRound"):
+            self.enemy_reset_shot(from_name[-1])
+
+        self.last_player_hit_time = now
+        self.player_lives = max(0, self.player_lives - 1)
+        self.hit_flash_alpha = 0.5
+        self.update_lives_hud()
+
+        if self.player_lives <= 0:
+            self.end_game()
+
+    def end_game(self):
+        self.game_over = True
+        self.gameOverTextObject.show()
+        self.sight_engaged_np.hide()
+        self.sight_clear_np.show()
+        self.ambient_snd.stop()
+        self.gameOver_snd.play()
+        for t in tanks_list:
+            tanks_dict[t]["move"] = False
+            tanks_dict[t]["shooting"] = False
+
+    def restart_game(self):
+        if not self.game_over:
+            return
+
+        self.game_over = False
+        self.player_lives = PLAYER_MAX_LIVES
+        self.last_player_hit_time = -PLAYER_HIT_COOLDOWN
+        self.hit_flash_alpha = 0
+        self.gameOverTextObject.hide()
+        self.hitFlashNp.hide()
+        self.gameOver_snd.stop()
+        self.ambient_snd.play()
+        self.camera.setPos(0, 0, 2)
+        self.camera.setHpr(0, 0, 0)
+        self.reset_shot()
+        for t in tanks_list:
+            tanks_dict[t]["move"] = True
+            tanks_dict[t]["shooting"] = False
+            tanks_dict[t]["tank"].show()
+            tanks_dict[t]["frags"].hide()
+            self.enemy_reset_shot(t)
+        self.update_lives_hud()
+
+    def updatePlayerFeedbackTask(self, task):
+        if self.hit_flash_alpha > 0:
+            fade = ClockObject.getGlobalClock().getDt() / PLAYER_FLASH_SECONDS
+            self.hit_flash_alpha = max(0, self.hit_flash_alpha - fade)
+            self.hitFlashNp.setColorScale(1, 0, 0, self.hit_flash_alpha)
+            self.hitFlashNp.show()
+        else:
+            self.hitFlashNp.hide()
+
+        return Task.cont
 
     def enemy_shoot_task(self, task):
+        if self.game_over:
+            return Task.cont
+
         for t in tanks_list:
             ShootAt = tanks_dict[t]["tank"].getRelativePoint(self.camera, (0 + random(), 0 + random(), 0 + random()))
             ShootAt = LVecBase2d(ShootAt[0], ShootAt[1]).normalized()
@@ -607,6 +676,37 @@ class MyApp(ShowBase):
             self.radar_blips[t] = blip_np
             self.radar_blip_luminance[t] = 0
 
+    def render_player_hud(self):
+        self.player_lives = PLAYER_MAX_LIVES
+        self.game_over = False
+        self.last_player_hit_time = -PLAYER_HIT_COOLDOWN
+        self.hit_flash_alpha = 0
+
+        self.livesTextObject = OnscreenText(text="", pos=(-1.28, 0.9),
+                                            align=TextNode.ALeft, scale=(0.04, 0.06),
+                                            fg=(0.4, 1.0, 0.4, 1), mayChange=True)
+        self.livesTextObject.reparentTo(aspect2d)
+
+        self.gameOverTextObject = OnscreenText(text="GAME OVER\nR TO RESTART", pos=(0, 0.08),
+                                               align=TextNode.ACenter, scale=(0.08, 0.1),
+                                               fg=(0.4, 1.0, 0.4, 1), mayChange=False)
+        self.gameOverTextObject.reparentTo(aspect2d)
+        self.gameOverTextObject.hide()
+
+        card = CardMaker("player-hit-flash")
+        card.setFrameFullscreenQuad()
+        self.hitFlashNp = render2d.attachNewNode(card.generate())
+        self.hitFlashNp.setTransparency(TransparencyAttrib.MAlpha)
+        self.hitFlashNp.setBin("fixed", 10)
+        self.hitFlashNp.setDepthWrite(False)
+        self.hitFlashNp.setColorScale(1, 0, 0, 0)
+        self.hitFlashNp.hide()
+
+        self.update_lives_hud()
+
+    def update_lives_hud(self):
+        self.livesTextObject.text = "LIVES " + " ".join(["|"] * self.player_lives)
+
     def explosion_cleanup(self, t):
         if t in tanks_list:
             tanks_dict[t]["frags"].hide()
@@ -655,6 +755,9 @@ class MyApp(ShowBase):
         # print(tanks_group.find("**/Tank1-Frags"))
 
     def moveTask(self, task):
+        if self.game_over:
+            return Task.cont
+
         is_down = base.mouseWatcherNode.is_button_down
 
         if is_down(arrow_right):
@@ -682,6 +785,8 @@ class MyApp(ShowBase):
         tanks_dict[t]["shooting"] = False
 
     def shoot(self):
+        if self.game_over:
+            return
 
         self.tank_round[0].setPos(0, 20, -0.2)
         self.sight_engaged_np.show()

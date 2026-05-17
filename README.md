@@ -33,6 +33,7 @@ Or from PowerShell on Windows:
 - Arrow keys: move and turn
 - Space: fire
 - B: toggle bloom
+- R: restart after game over
 
 The lower-left HUD radar shows enemy tank positions relative to your current heading. Enemy returns brighten when scanned, then fade like phosphor.
 
