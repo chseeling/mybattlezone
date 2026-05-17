@@ -8,12 +8,31 @@ Wireframe Battlezone-style prototype built with Panda3D.
 python -m pip install -r requirements.txt
 ```
 
+On Windows, this repo also has a local virtual environment setup:
+
+```
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
 ## Run
 
 ```
 cd mybattlezone
 python test02.py
 ```
+
+Or from PowerShell on Windows:
+
+```
+.\run.ps1
+```
+
+## Controls
+
+- Arrow keys: move and turn
+- Space: fire
+- B: toggle bloom
 
 To show collision debug output:
 
