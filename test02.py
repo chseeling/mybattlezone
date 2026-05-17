@@ -1,4 +1,4 @@
-from panda3d.core import loadPrcFile, AntialiasAttrib, KeyboardButton, CollisionSphere, CollisionNode
+from panda3d.core import loadPrcFile, AntialiasAttrib, KeyboardButton, CollisionSphere, CollisionNode, CollisionBox, CollisionPolygon
 from panda3d.core import CollisionTraverser, CollisionHandlerEvent
 
 from direct.interval.IntervalGlobal import *
@@ -71,6 +71,16 @@ RADAR_BLIP_IDLE_ALPHA = 0.03
 PLAYER_MAX_LIVES = 3
 PLAYER_HIT_COOLDOWN = 1.2
 PLAYER_FLASH_SECONDS = 0.45
+PLAYER_COLLISION_RADIUS = 1.5
+TANK_COLLISION_RADIUS = 1.6
+OBSTACLES = (
+    {"name": "Block-1", "kind": "block", "pos": Point3(18, 38, 0), "scale": Point3(7, 7, 5),
+     "radius": 6.0},
+    {"name": "Pyramid-1", "kind": "pyramid", "pos": Point3(-16, 32, 0), "scale": Point3(9, 9, 7),
+     "radius": 6.5},
+    {"name": "Cone-1", "kind": "cone", "pos": Point3(4, 68, 0), "scale": Point3(8, 8, 8),
+     "radius": 5.8},
+)
 RADAR_SWEEP_TRAILS = (
     (0, 0.55, 2),
     (28, 0.10, 1),
@@ -228,6 +238,148 @@ def procedural_radar_sweep(radius):
     lines.moveTo(0, 0, 0)
     lines.drawTo(0, 0, radius * 0.92)
     return lines
+
+
+def procedural_block():
+    lines = LineSegs("structure-block")
+    corners = [
+        (-0.5, -0.5, 0), (0.5, -0.5, 0), (0.5, 0.5, 0), (-0.5, 0.5, 0),
+        (-0.5, -0.5, 1), (0.5, -0.5, 1), (0.5, 0.5, 1), (-0.5, 0.5, 1),
+    ]
+    edges = (
+        (0, 1), (1, 2), (2, 3), (3, 0),
+        (4, 5), (5, 6), (6, 7), (7, 4),
+        (0, 4), (1, 5), (2, 6), (3, 7),
+    )
+    for start, end in edges:
+        lines.moveTo(*corners[start])
+        lines.drawTo(*corners[end])
+    return lines
+
+
+def procedural_pyramid():
+    lines = LineSegs("structure-pyramid")
+    base = [(-0.5, -0.5, 0), (0.5, -0.5, 0), (0.5, 0.5, 0), (-0.5, 0.5, 0)]
+    apex = (0, 0, 1)
+    for idx, point in enumerate(base):
+        next_point = base[(idx + 1) % len(base)]
+        lines.moveTo(*point)
+        lines.drawTo(*next_point)
+        lines.moveTo(*point)
+        lines.drawTo(*apex)
+    return lines
+
+
+def procedural_cone(segments=20):
+    lines = LineSegs("structure-cone")
+    apex = (0, 0, 1)
+    points = []
+    for i in range(segments):
+        theta = 2 * pi * i / segments
+        points.append((0.5 * cos(theta), 0.5 * sin(theta), 0))
+
+    for i, point in enumerate(points):
+        next_point = points[(i + 1) % segments]
+        lines.moveTo(*point)
+        lines.drawTo(*next_point)
+        if i % 4 == 0:
+            lines.moveTo(*point)
+            lines.drawTo(*apex)
+    return lines
+
+
+def create_structure_faces(kind):
+    vertex_format = GeomVertexFormat.getV3()
+    vertex_data = GeomVertexData("structure-faces-" + kind, vertex_format, Geom.UHStatic)
+    vertices = GeomVertexWriter(vertex_data, "vertex")
+    tris = GeomTriangles(Geom.UHStatic)
+
+    def add_vertex(point):
+        vertices.addData3f(*point)
+
+    def add_triangle(a, b, c):
+        row = vertex_data.getNumRows()
+        vertex_data.setNumRows(row + 3)
+        add_vertex(a)
+        add_vertex(b)
+        add_vertex(c)
+        tris.addVertices(row, row + 1, row + 2)
+
+    def add_quad(a, b, c, d):
+        add_triangle(a, b, c)
+        add_triangle(a, c, d)
+
+    if kind == "block":
+        p = [
+            (-0.5, -0.5, 0), (0.5, -0.5, 0), (0.5, 0.5, 0), (-0.5, 0.5, 0),
+            (-0.5, -0.5, 1), (0.5, -0.5, 1), (0.5, 0.5, 1), (-0.5, 0.5, 1),
+        ]
+        for face in ((0, 1, 2, 3), (4, 7, 6, 5), (0, 4, 5, 1),
+                     (1, 5, 6, 2), (2, 6, 7, 3), (3, 7, 4, 0)):
+            add_quad(p[face[0]], p[face[1]], p[face[2]], p[face[3]])
+    elif kind == "pyramid":
+        base = [(-0.5, -0.5, 0), (0.5, -0.5, 0), (0.5, 0.5, 0), (-0.5, 0.5, 0)]
+        apex = (0, 0, 1)
+        add_quad(base[0], base[1], base[2], base[3])
+        for idx, point in enumerate(base):
+            add_triangle(point, base[(idx + 1) % len(base)], apex)
+    elif kind == "cone":
+        segments = 24
+        center = (0, 0, 0)
+        apex = (0, 0, 1)
+        points = []
+        for i in range(segments):
+            theta = 2 * pi * i / segments
+            points.append((0.5 * cos(theta), 0.5 * sin(theta), 0))
+        for idx, point in enumerate(points):
+            next_point = points[(idx + 1) % segments]
+            add_triangle(center, next_point, point)
+            add_triangle(point, next_point, apex)
+
+    geom = Geom(vertex_data)
+    geom.addPrimitive(tris)
+    node = GeomNode("structure-faces-" + kind)
+    node.addGeom(geom)
+    return NodePath(node)
+
+
+def add_obstacle_shot_solids(collision_node, obstacle):
+    kind = obstacle["kind"]
+    scale = obstacle["scale"]
+    half_x = scale[0] * 0.5
+    half_y = scale[1] * 0.5
+    height = scale[2]
+
+    def add_polygon(*points):
+        collision_node.addSolid(CollisionPolygon(*points))
+        collision_node.addSolid(CollisionPolygon(*reversed(points)))
+
+    if kind == "block":
+        collision_node.addSolid(CollisionBox(Point3(0, 0, height * 0.5),
+                                             half_x,
+                                             half_y,
+                                             height * 0.5))
+    elif kind == "pyramid":
+        base = [
+            Point3(-half_x, -half_y, 0), Point3(half_x, -half_y, 0),
+            Point3(half_x, half_y, 0), Point3(-half_x, half_y, 0),
+        ]
+        apex = Point3(0, 0, height)
+        add_polygon(*base)
+        for idx, point in enumerate(base):
+            add_polygon(point, base[(idx + 1) % len(base)], apex)
+    elif kind == "cone":
+        segments = 16
+        center = Point3(0, 0, 0)
+        apex = Point3(0, 0, height)
+        points = []
+        for i in range(segments):
+            theta = 2 * pi * i / segments
+            points.append(Point3(half_x * cos(theta), half_y * sin(theta), 0))
+        for idx, point in enumerate(points):
+            next_point = points[(idx + 1) % segments]
+            add_polygon(center, next_point, point)
+            add_polygon(point, next_point, apex)
 
 
 def angular_distance_degrees(a, b):
@@ -416,6 +568,7 @@ class MyApp(ShowBase):
         grid_np.instanceTo(self.grid)
         self.grid.setColorScale(0.15, 0.2, 0.15, 1.0)
         self.grid.setPos(0, 0, -0.2)
+        self.render_obstacles()
 
         alight = AmbientLight('ambientLight')
         alight.setColor(Vec4(0, 0, 0, 0))  # ambient light is dim red
@@ -457,6 +610,8 @@ class MyApp(ShowBase):
             self.accept('into-' + 'cTank' + t, self.tank0_round_hit)
             self.accept('explosion{}-done'.format(t), self.explosion_cleanup, extraArgs=[t])
             self.accept('shot{}-done'.format(t), self.enemy_reset_shot, extraArgs=[t])
+        for obstacle in OBSTACLES:
+            self.accept('into-cObstacle-' + obstacle["name"], self.round_obstacle_hit)
 
         # on-screen text
         vect = self.camera.getHpr()
@@ -544,6 +699,7 @@ class MyApp(ShowBase):
             tanks_dict[t]["shooting"] = False
             tanks_dict[t]["tank"].show()
             tanks_dict[t]["frags"].hide()
+            tanks_dict[t].pop("last_pos", None)
             self.enemy_reset_shot(t)
         self.update_lives_hud()
 
@@ -605,6 +761,37 @@ class MyApp(ShowBase):
             configure_bloom_layer(bloom_np, MOUNTAIN_BLOOM_ALPHA)
 
             mountain_core.instanceTo(placeholder.attachNewNode("mountain-lines-Core"))
+
+    def render_obstacles(self):
+        self.obstacle_group = render.attachNewNode("Obstacles")
+        factories = {
+            "block": procedural_block,
+            "pyramid": procedural_pyramid,
+            "cone": procedural_cone,
+        }
+
+        for obstacle in OBSTACLES:
+            lines = factories[obstacle["kind"]]()
+            lines.setThickness(3)
+            node_path = NodePath(lines.create())
+            face_path = create_structure_faces(obstacle["kind"])
+            placeholder = self.obstacle_group.attachNewNode(obstacle["name"])
+            faces_np = placeholder.attachNewNode(obstacle["name"] + "-Faces")
+            face_path.instanceTo(faces_np)
+            faces_np.setTransparency(TransparencyAttrib.MAlpha, 20)
+            faces_np.setColorScale(0, 0.8, 0.22, 0.18, 20)
+            faces_np.setBin("transparent", 0)
+            faces_np.setDepthWrite(False, 20)
+            node_path.instanceTo(placeholder.attachNewNode(obstacle["name"] + "-Lines"))
+            placeholder.setPos(obstacle["pos"])
+            placeholder.setScale(obstacle["scale"])
+            placeholder.find("**/*-Lines").setColorScale(0, 0.55, 0.15, 1.0)
+
+            collision_np = self.obstacle_group.attachNewNode(CollisionNode("cObstacle-" + obstacle["name"]))
+            collision_np.setPos(obstacle["pos"])
+            add_obstacle_shot_solids(collision_np.node(), obstacle)
+            if DEBUG:
+                collision_np.show()
 
     def render_sight(self):
         ls = procedural_sight(LineSegs(), True, False)
@@ -719,6 +906,7 @@ class MyApp(ShowBase):
             pos = tanks_dict[t]["Locator"].getPos()
             tanks_dict[t]["Locator"].setPos(-pos[1], -pos[0], 0)
             tanks_dict[t]["move"] = True
+            tanks_dict[t].pop("last_pos", None)
             tanks_dict[t]["tank"].show()
 
     def renderTanks(self, tanks_group):
@@ -760,6 +948,47 @@ class MyApp(ShowBase):
 
         # print(tanks_group.find("**/Tank1-Frags"))
 
+    def resolve_obstacle_position(self, pos, body_radius):
+        resolved = Point3(pos)
+        for obstacle in OBSTACLES:
+            obstacle_pos = obstacle["pos"]
+            min_dist = obstacle["radius"] + body_radius
+            dx = resolved[0] - obstacle_pos[0]
+            dy = resolved[1] - obstacle_pos[1]
+            dist = math.sqrt(dx ** 2 + dy ** 2)
+
+            if dist >= min_dist:
+                continue
+
+            if dist < 0.001:
+                dx = 1
+                dy = 0
+                dist = 1
+
+            resolved[0] = obstacle_pos[0] + dx / dist * min_dist
+            resolved[1] = obstacle_pos[1] + dy / dist * min_dist
+
+        return resolved
+
+    def is_obstacle_blocked(self, pos, body_radius):
+        resolved = self.resolve_obstacle_position(pos, body_radius)
+        return math.sqrt((resolved[0] - pos[0]) ** 2 + (resolved[1] - pos[1]) ** 2) > 0.001
+
+    def normalized_xy(self, vector):
+        length = math.sqrt(vector[0] ** 2 + vector[1] ** 2)
+        if length < 0.001:
+            return Point3(0, 1, 0)
+        return Point3(vector[0] / length, vector[1] / length, 0)
+
+    def round_obstacle_hit(self, entry):
+        from_name = entry.getFromNodePath().node().name
+        if from_name == "cTankRound":
+            self.reset_shot()
+        elif from_name.startswith("ceTankRound"):
+            t = from_name[-1]
+            if t in tanks_list:
+                self.enemy_reset_shot(t)
+
     def moveTask(self, task):
         if self.game_over:
             return Task.cont
@@ -771,9 +1000,13 @@ class MyApp(ShowBase):
         if is_down(arrow_left):
             self.camera.setHpr(self.camera, camera_dict["turn_ang_vel"], 0, 0)
         if is_down(arrow_back):
-            self.camera.setPos(self.camera, 0, -camera_dict["translate_vel"], 0)
+            step = render.getRelativeVector(self.camera, (0, -camera_dict["translate_vel"], 0))
+            next_pos = self.resolve_obstacle_position(self.camera.getPos(render) + step, PLAYER_COLLISION_RADIUS)
+            self.camera.setPos(render, next_pos)
         if is_down(arrow_forward):
-            self.camera.setPos(self.camera, 0, camera_dict["translate_vel"], 0)
+            step = render.getRelativeVector(self.camera, (0, camera_dict["translate_vel"], 0))
+            next_pos = self.resolve_obstacle_position(self.camera.getPos(render) + step, PLAYER_COLLISION_RADIUS)
+            self.camera.setPos(render, next_pos)
         return Task.cont
 
     def reset_shot(self):
@@ -900,7 +1133,19 @@ class MyApp(ShowBase):
                 dx = Ax * Bx * cos(Bx * task.time)
                 dy = Ay * By * cos(By * task.time)
                 heading = math.degrees(math.atan2(dy, dx))
-                tanks_dict[t]["tank"].setPos(x, y, 0)
+                locator = tanks_dict[t]["Locator"]
+                desired_world = render.getRelativePoint(locator, Point3(x, y, 0))
+                avoided_world = self.resolve_obstacle_position(desired_world, TANK_COLLISION_RADIUS)
+                local_pos = locator.getRelativePoint(render, avoided_world)
+
+                previous_world = tanks_dict[t].get("last_pos", desired_world)
+                move_dx = avoided_world[0] - previous_world[0]
+                move_dy = avoided_world[1] - previous_world[1]
+                if abs(move_dx) + abs(move_dy) > 0.001:
+                    heading = math.degrees(math.atan2(move_dy, move_dx))
+
+                tanks_dict[t]["last_pos"] = Point3(avoided_world)
+                tanks_dict[t]["tank"].setPos(local_pos[0], local_pos[1], 0)
                 tanks_dict[t]["tank"].setH(heading)
 
         return Task.cont
