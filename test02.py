@@ -7,6 +7,7 @@ loadPrcFile("config/conf.prc")
 
 import json
 import math
+import os
 from math import pi, sin, cos
 from random import random
 
@@ -16,9 +17,7 @@ from direct.task import Task
 from panda3d.core import AmbientLight
 from panda3d.core import Vec4, Mat4, Point3, Point4, BitMask32
 from panda3d.core import LineSegs, NodePath
-from panda3d.core import LVecBase4, LVecBase2d, InputDevice
-
-from pandac.PandaModules import WindowProperties
+from panda3d.core import LVecBase4, LVecBase2d, InputDevice, WindowProperties
 
 from direct.gui.OnscreenText import OnscreenText
 from direct.interval.LerpInterval import LerpPosInterval
@@ -54,7 +53,7 @@ tanks_dict = {"0": {},
               }
 
 tanks_list = {'1', '2', '3'}
-DEBUG = True
+DEBUG = os.environ.get("BATTLEZONE_DEBUG", "").lower() in {"1", "true", "yes", "on"}
 
 
 def procedural_grid(x_min, x_max, y_min, y_max, n):
@@ -164,11 +163,12 @@ class MyApp(ShowBase):
         self.enemyShot_snd = base.loader.loadSfx("sfx/enemyShot.ogg")
         self.enemyTankExplosion_snd = base.loader.loadSfx("sfx/enemyTankExplosion.ogg")
 
-        device_list = self.devices.getDevices()
-        for device in device_list:
-            print(device.device_class)
-            # if device.device_class == DeviceClass.flight_stick:
-            #    print("Have Joy stick")
+        if DEBUG:
+            device_list = self.devices.getDevices()
+            for device in device_list:
+                print(device.device_class)
+                # if device.device_class == DeviceClass.flight_stick:
+                #    print("Have Joy stick")
 
         # render.setDepthTest(False)
         self.camLens.setFov(50)
@@ -235,7 +235,8 @@ class MyApp(ShowBase):
         ####################
         # collisions       #
         ####################
-        print(CollisionNode.getDefaultCollideMask())
+        if DEBUG:
+            print(CollisionNode.getDefaultCollideMask())
 
         # Initialize collision Handler
         self.collHandEvent = CollisionHandlerEvent()
@@ -559,5 +560,6 @@ class MyApp(ShowBase):
         return Task.cont
 
 
-app = MyApp()
-app.run()
+if __name__ == "__main__":
+    app = MyApp()
+    app.run()
