@@ -1,5 +1,5 @@
-win-size 2048 1024
-window-title Battlefront
-show-frame-rate-meter true
-show-scene-graph-analyzer-meter true
+win-size 1280 720
+window-title My Battlezone
+show-frame-rate-meter false
+show-scene-graph-analyzer-meter false
 sync-video true

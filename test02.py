@@ -16,7 +16,7 @@ from direct.task import Task
 
 from panda3d.core import AmbientLight
 from panda3d.core import Vec4, Mat4, Point3, Point4, BitMask32
-from panda3d.core import LineSegs, NodePath
+from panda3d.core import LineSegs, NodePath, TransparencyAttrib, ColorBlendAttrib, TextNode
 from panda3d.core import LVecBase4, LVecBase2d, InputDevice, WindowProperties
 
 from direct.gui.OnscreenText import OnscreenText
@@ -54,6 +54,10 @@ tanks_dict = {"0": {},
 
 tanks_list = {'1', '2', '3'}
 DEBUG = os.environ.get("BATTLEZONE_DEBUG", "").lower() in {"1", "true", "yes", "on"}
+MOUNTAIN_BLOOM_ALPHA = 0.11
+MOUNTAIN_BLOOM_THICKNESS = 7
+MOUNTAIN_HALO_ALPHA = 0.025
+MOUNTAIN_HALO_THICKNESS = 16
 
 
 def procedural_grid(x_min, x_max, y_min, y_max, n):
@@ -81,6 +85,17 @@ def procedural_grid(x_min, x_max, y_min, y_max, n):
 
     return lines
 
+
+def configure_bloom_layer(node_path, alpha):
+    node_path.setTransparency(TransparencyAttrib.MAlpha, 10)
+    node_path.setAttrib(ColorBlendAttrib.make(ColorBlendAttrib.MAdd), 10)
+    node_path.setBin("transparent", 0)
+    node_path.setDepthWrite(False, 10)
+    node_path.setDepthTest(False, 10)
+    node_path.setColorScale(alpha, alpha, alpha, alpha, 10)
+    return node_path
+
+
 def create_lineSegs_object(data, idx_start=1, name='lines_'):
     points = data['points']
     lines_def = data['lines']
@@ -95,6 +110,12 @@ def create_lineSegs_object(data, idx_start=1, name='lines_'):
             idx1 = idx1 - idx_start
             lines.drawTo(points[idx1][0], points[idx1][1], points[idx1][2])
     return lines
+
+
+def create_line_nodepath(data, idx_start=1, name='lines_', thickness=3):
+    lines = create_lineSegs_object(data, idx_start, name)
+    lines.setThickness(thickness)
+    return NodePath(lines.create())
 
 # n : number of repeats on cylinder
 def map_mountains(points, n):
@@ -178,7 +199,8 @@ class MyApp(ShowBase):
         base.disableMouse()
         props = WindowProperties()
         # props.setCursorHidden(True)
-        base.win.requestProperties(props)
+        if hasattr(base.win, "requestProperties"):
+            base.win.requestProperties(props)
 
         # Load the environment models
         self.ground = self.loader.loadModel("models/ground_bl.egg")
@@ -295,7 +317,9 @@ class MyApp(ShowBase):
         grid_lines = procedural_grid(-1000, 500, -1000, 500, 50)
         grid_lines.setThickness(1)
         node = grid_lines.create()
-        self.grid = NodePath(node)
+        grid_np = NodePath(node)
+        self.grid = render.attachNewNode("Grid")
+        grid_np.instanceTo(self.grid)
         self.grid.setColorScale(0.15, 0.2, 0.15, 1.0)
         self.grid.setPos(0, 0, -0.2)
 
@@ -317,9 +341,11 @@ class MyApp(ShowBase):
 
         # base.messenger.toggleVerbose()
 
+        self.bloom_enabled = True
         self.accept('space', self.shoot)
         self.accept('space-up', self.shot_clear)
         self.accept('shot-done', self.reset_shot)
+        self.accept('b', self.toggle_bloom)
 
         self.accept('into-' + 'cmTank', self.struck)
         for t in tanks_list:
@@ -332,6 +358,11 @@ class MyApp(ShowBase):
         self.textObject = OnscreenText(text=str(vect[0]), pos=(-0.5, -0.9),
                                        scale=(0.03, 0.05), fg=(0.4, 1.0, 0.4, 1), mayChange=True)
         self.textObject.reparentTo(self.render2d)
+        self.bloomTextObject = OnscreenText(text="", pos=(1.05, -0.9),
+                                            align=TextNode.ALeft, scale=(0.03, 0.05),
+                                            fg=(0.4, 1.0, 0.4, 1), mayChange=True)
+        self.bloomTextObject.reparentTo(self.render2d)
+        self.set_bloom_enabled(self.bloom_enabled)
 
         mySound.setLoop(True)
         mySound.play()
@@ -339,6 +370,26 @@ class MyApp(ShowBase):
         # mainShot_snd.setLoop(True)
 
         # sfxMgr = base.sfxManagerList[0]
+
+    def bloom_nodes(self):
+        nodes = []
+        for root in (render, render2d):
+            nodes.extend(root.findAllMatches("**/*Bloom"))
+            nodes.extend(root.findAllMatches("**/*Halo"))
+        return nodes
+
+    def set_bloom_enabled(self, enabled):
+        self.bloom_enabled = enabled
+        for node in self.bloom_nodes():
+            if enabled:
+                node.show()
+            else:
+                node.hide()
+
+        self.bloomTextObject.text = "BLOOM ON" if enabled else "BLOOM OFF"
+
+    def toggle_bloom(self):
+        self.set_bloom_enabled(not self.bloom_enabled)
 
     def struck(self, entry):
         print("struck")
@@ -366,10 +417,9 @@ class MyApp(ShowBase):
         n = 2  # number of repeats in circumference
         data['points'] = map_mountains(data['points'], n)
 
-        lines = create_lineSegs_object(data, 1)
-        lines.setThickness(3)
-        node = lines.create()
-        np = NodePath(node)
+        mountain_core = create_line_nodepath(data, 1, "mountain-core-lines", 3)
+        mountain_bloom = create_line_nodepath(data, 1, "mountain-bloom-lines", MOUNTAIN_BLOOM_THICKNESS)
+        mountain_halo = create_line_nodepath(data, 1, "mountain-halo-lines", MOUNTAIN_HALO_THICKNESS)
         scale = 7000
         for i in range(n):
             angleRadians = 2 * pi / n * i
@@ -377,8 +427,17 @@ class MyApp(ShowBase):
             placeholder.setH(placeholder, 360 / n * i)
             # placeholder.setPos(sin(angleRadians), cos(angleRadians), 0)
             placeholder.setScale(scale, scale, scale / n / 2.5)
-            np.instanceTo(placeholder)
-        np.setColorScale(0, 0.7, 0, 1.0)
+            placeholder.setColorScale(0, 0.7, 0, 1.0)
+
+            halo_np = placeholder.attachNewNode("mountain-lines-Halo")
+            mountain_halo.instanceTo(halo_np)
+            configure_bloom_layer(halo_np, MOUNTAIN_HALO_ALPHA)
+
+            bloom_np = placeholder.attachNewNode("mountain-lines-Bloom")
+            mountain_bloom.instanceTo(bloom_np)
+            configure_bloom_layer(bloom_np, MOUNTAIN_BLOOM_ALPHA)
+
+            mountain_core.instanceTo(placeholder.attachNewNode("mountain-lines-Core"))
 
     def render_sight(self):
         ls = procedural_sight(LineSegs(), True, False)
