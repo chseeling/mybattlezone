@@ -18,7 +18,7 @@ from panda3d.core import AmbientLight
 from panda3d.core import Vec4, Mat4, Point3, Point4, BitMask32
 from panda3d.core import LineSegs, NodePath, TransparencyAttrib, ColorBlendAttrib, TextNode, ClockObject, CardMaker
 from panda3d.core import Geom, GeomNode, GeomTriangles, GeomVertexData, GeomVertexFormat, GeomVertexWriter
-from panda3d.core import LVecBase4, LVecBase2d, InputDevice, WindowProperties
+from panda3d.core import LVecBase4, LVecBase2d, InputDevice, WindowProperties, Camera, PerspectiveLens
 
 from direct.gui.OnscreenText import OnscreenText
 from direct.interval.LerpInterval import LerpPosInterval
@@ -68,6 +68,12 @@ RADAR_SWEEP_SLICE_ALPHA = 0.16
 RADAR_SCAN_WIDTH_DEGREES = 6
 RADAR_BLIP_FADE_SECONDS = 1.6
 RADAR_BLIP_IDLE_ALPHA = 0.03
+HUD_VIEWPORTS = (
+    {"name": "PANORAMA", "heading": 0, "slot": (0.00, 1.00, 0.76, 1.00), "fov": 270, "aspect": 48 / 7,
+     "slices": 18},
+    {"name": "REAR", "heading": 180, "slot": (0.333, 0.667, 0.02, 0.26), "fov": 48, "aspect": 4 / 3},
+)
+HUD_VIEW_PADDING = 0.012
 PLAYER_MAX_LIVES = 3
 PLAYER_HIT_COOLDOWN = 1.2
 PLAYER_FLASH_SECONDS = 0.45
@@ -578,6 +584,7 @@ class MyApp(ShowBase):
         self.render_sight()
         self.render_radar()
         self.render_player_hud()
+        self.render_auxiliary_views()
 
         # Tasks
         for t in tanks_list:
@@ -589,6 +596,7 @@ class MyApp(ShowBase):
         self.taskMgr.add(self.enemy_shoot_task, "EnemyShoot")
         self.taskMgr.add(self.updateRadarTask, "UpdateRadarTask")
         self.taskMgr.add(self.updatePlayerFeedbackTask, "UpdatePlayerFeedbackTask")
+        self.taskMgr.add(self.updateAuxiliaryViewsTask, "UpdateAuxiliaryViewsTask")
 
         # base.messenger.toggleVerbose()
 
@@ -640,9 +648,11 @@ class MyApp(ShowBase):
 
     def set_bloom_enabled(self, enabled):
         self.bloom_enabled = enabled
+        auxiliary_camera_mask = BitMask32.bit(1)
         for node in self.bloom_nodes():
             if enabled:
                 node.show()
+                node.hide(auxiliary_camera_mask)
             else:
                 node.hide()
 
@@ -899,6 +909,131 @@ class MyApp(ShowBase):
 
     def update_lives_hud(self):
         self.livesTextObject.text = "LIVES " + " ".join(["|"] * self.player_lives)
+
+    def render_auxiliary_views(self):
+        self.auxiliary_cameras = []
+        self.panorama_overlay_root = NodePath("PanoramaOverlay")
+        overlay_camera_node = Camera("PanoramaOverlayCamera")
+        overlay_camera_node.setLens(base.cam2d.node().getLens())
+        overlay_camera_node.setScene(self.panorama_overlay_root)
+        overlay_camera = NodePath(overlay_camera_node)
+        overlay_region = base.win.makeDisplayRegion(0, 1, 0, 1)
+        overlay_region.setSort(30)
+        overlay_region.setClearColorActive(False)
+        overlay_region.setClearDepthActive(False)
+        overlay_region.setCamera(overlay_camera)
+        self.panorama_overlay_camera = overlay_camera
+        self.panorama_overlay_region = overlay_region
+        aspect = base.getAspectRatio()
+
+        for view in HUD_VIEWPORTS:
+            slot_left, slot_right, slot_bottom, slot_top = view["slot"]
+            slot_width = slot_right - slot_left
+            slot_height = slot_top - slot_bottom
+            view_aspect = view["aspect"]
+            desired_width = slot_height * view_aspect / aspect
+            desired_height = slot_width * aspect / view_aspect
+
+            if desired_width <= slot_width:
+                width = desired_width
+                height = slot_height
+            else:
+                width = slot_width
+                height = desired_height
+
+            left = slot_left + (slot_width - width) * 0.5 + HUD_VIEW_PADDING
+            right = slot_left + (slot_width + width) * 0.5 - HUD_VIEW_PADDING
+            bottom = slot_bottom + (slot_height - height) * 0.5 + HUD_VIEW_PADDING
+            top = slot_bottom + (slot_height + height) * 0.5 - HUD_VIEW_PADDING
+
+            slices = view.get("slices", 1)
+            slice_fov = view["fov"] / slices
+            for slice_index in range(slices):
+                slice_left = left + (right - left) * slice_index / slices
+                slice_right = left + (right - left) * (slice_index + 1) / slices
+
+                display_region = base.win.makeDisplayRegion(slice_left, slice_right, bottom, top)
+                display_region.setSort(10)
+                display_region.setClearColorActive(True)
+                display_region.setClearColor(Vec4(0, 0, 0, 1))
+
+                lens = PerspectiveLens()
+                lens.setFov(slice_fov)
+                lens.setAspectRatio((slice_right - slice_left) * aspect / (top - bottom))
+                camera_node = Camera("Hud{}Camera{}".format(view["name"].title(), slice_index))
+                camera_node.setLens(lens)
+                camera_np = render.attachNewNode(camera_node)
+                display_region.setCamera(camera_np)
+
+                ordered_slice_index = slices - slice_index - 1
+                heading_offset = -view["fov"] * 0.5 + slice_fov * (ordered_slice_index + 0.5)
+                self.auxiliary_cameras.append({
+                    "camera": camera_np,
+                    "heading": view["heading"] + heading_offset,
+                    "region": display_region,
+                })
+
+            x0 = (left * 2 - 1) * aspect
+            x1 = (right * 2 - 1) * aspect
+            z0 = bottom * 2 - 1
+            z1 = top * 2 - 1
+            frame = LineSegs("Hud{}ViewFrame".format(view["name"].title()))
+            frame.setThickness(2)
+            frame.moveTo(x0, 0, z0)
+            frame.drawTo(x1, 0, z0)
+            frame.drawTo(x1, 0, z1)
+            frame.drawTo(x0, 0, z1)
+            frame.drawTo(x0, 0, z0)
+            frame_np = aspect2d.attachNewNode(frame.create())
+            frame_np.setColorScale(0, 0.55, 0, 1)
+
+            if view["name"] == "PANORAMA":
+                self.render_panorama_main_view_edges(view, x0, x1, z0, z1)
+
+            label = OnscreenText(text=view["name"], pos=((x0 + x1) * 0.5, z0 - 0.035),
+                                 align=TextNode.ACenter, scale=(0.025, 0.038),
+                                 fg=(0.35, 1.0, 0.35, 1), mayChange=False)
+            label.reparentTo(aspect2d)
+
+        self.hide_bloom_from_auxiliary_views()
+
+    def render_panorama_main_view_edges(self, view, x0, x1, z0, z1):
+        edge_angle = self.camLens.getFov()[0] * 0.5
+        dash_count = 12
+        dash_gap = (z1 - z0) / (dash_count * 2 - 1)
+        markers = LineSegs("PanoramaMainViewportEdges")
+        markers.setThickness(2)
+
+        for angle in (edge_angle, -edge_angle):
+            relative_angle = angle - view["heading"]
+            fraction = (view["fov"] * 0.5 - relative_angle) / view["fov"]
+            x = x0 + (x1 - x0) * fraction
+            for dash_index in range(dash_count):
+                dash_start = z0 + dash_gap * dash_index * 2
+                dash_end = min(dash_start + dash_gap, z1)
+                markers.moveTo(x, 0, dash_start)
+                markers.drawTo(x, 0, dash_end)
+
+        marker_np = self.panorama_overlay_root.attachNewNode(markers.create())
+        marker_np.setScale(1 / base.getAspectRatio(), 1, 1)
+        marker_np.setColorScale(0.0, 0.45, 0.65, 1)
+
+    def hide_bloom_from_auxiliary_views(self):
+        camera_mask = BitMask32.bit(1)
+        for view in self.auxiliary_cameras:
+            view["camera"].node().setCameraMask(camera_mask)
+
+        for node in self.bloom_nodes():
+            node.hide(camera_mask)
+
+    def updateAuxiliaryViewsTask(self, task):
+        pos = self.camera.getPos(render)
+        hpr = self.camera.getHpr(render)
+        for view in self.auxiliary_cameras:
+            view["camera"].setPos(render, pos)
+            view["camera"].setHpr(render, hpr[0] + view["heading"], 0, 0)
+
+        return Task.cont
 
     def explosion_cleanup(self, t):
         if t in tanks_list:
