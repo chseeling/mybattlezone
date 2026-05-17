@@ -16,7 +16,8 @@ from direct.task import Task
 
 from panda3d.core import AmbientLight
 from panda3d.core import Vec4, Mat4, Point3, Point4, BitMask32
-from panda3d.core import LineSegs, NodePath, TransparencyAttrib, ColorBlendAttrib, TextNode
+from panda3d.core import LineSegs, NodePath, TransparencyAttrib, ColorBlendAttrib, TextNode, ClockObject
+from panda3d.core import Geom, GeomNode, GeomTriangles, GeomVertexData, GeomVertexFormat, GeomVertexWriter
 from panda3d.core import LVecBase4, LVecBase2d, InputDevice, WindowProperties
 
 from direct.gui.OnscreenText import OnscreenText
@@ -58,6 +59,20 @@ MOUNTAIN_BLOOM_ALPHA = 0.11
 MOUNTAIN_BLOOM_THICKNESS = 7
 MOUNTAIN_HALO_ALPHA = 0.025
 MOUNTAIN_HALO_THICKNESS = 16
+RADAR_RADIUS = 0.18
+RADAR_RANGE = 120
+RADAR_MARGIN = 0.12
+RADAR_SWEEP_SPEED = 120
+RADAR_SWEEP_SLICE_DEGREES = 78
+RADAR_SWEEP_SLICE_ALPHA = 0.16
+RADAR_SCAN_WIDTH_DEGREES = 6
+RADAR_BLIP_FADE_SECONDS = 1.6
+RADAR_BLIP_IDLE_ALPHA = 0.03
+RADAR_SWEEP_TRAILS = (
+    (0, 0.55, 2),
+    (28, 0.10, 1),
+    (56, 0.04, 1),
+)
 
 
 def procedural_grid(x_min, x_max, y_min, y_max, n):
@@ -173,6 +188,81 @@ def procedural_sight(line_seg, lower_level, engaged):
     line_seg.draw_to(0, 0, 0 + sight_level - m * 0.25)
 
     return line_seg
+
+
+def procedural_radar_frame(radius):
+    lines = LineSegs("radar-frame")
+    segments = 48
+    lines.moveTo(radius, 0, 0)
+    for i in range(1, segments + 1):
+        theta = 2 * pi * i / segments
+        lines.drawTo(radius * cos(theta), 0, radius * sin(theta))
+
+    tick = radius * 0.35
+    lines.moveTo(-tick, 0, 0)
+    lines.drawTo(tick, 0, 0)
+    lines.moveTo(0, 0, -tick)
+    lines.drawTo(0, 0, tick)
+    lines.moveTo(0, 0, radius * 0.58)
+    lines.drawTo(-radius * 0.09, 0, radius * 0.42)
+    lines.moveTo(0, 0, radius * 0.58)
+    lines.drawTo(radius * 0.09, 0, radius * 0.42)
+    return lines
+
+
+def procedural_radar_blip(size):
+    lines = LineSegs("radar-blip")
+    lines.moveTo(0, 0, size)
+    lines.drawTo(size, 0, 0)
+    lines.drawTo(0, 0, -size)
+    lines.drawTo(-size, 0, 0)
+    lines.drawTo(0, 0, size)
+    return lines
+
+
+def procedural_radar_sweep(radius):
+    lines = LineSegs("radar-sweep")
+    lines.moveTo(0, 0, 0)
+    lines.drawTo(0, 0, radius * 0.92)
+    return lines
+
+
+def angular_distance_degrees(a, b):
+    return abs((a - b + 180) % 360 - 180)
+
+
+def create_radar_sweep_slice(radius, arc_degrees, max_alpha, segments=18):
+    vertex_format = GeomVertexFormat.getV3c4()
+    vertex_data = GeomVertexData("radar-sweep-slice", vertex_format, Geom.UHStatic)
+    vertex_data.setNumRows(segments * 3)
+
+    vertices = GeomVertexWriter(vertex_data, "vertex")
+    colors = GeomVertexWriter(vertex_data, "color")
+    tris = GeomTriangles(Geom.UHStatic)
+
+    for i in range(segments):
+        old_t = i / segments
+        new_t = (i + 1) / segments
+        old_angle = math.radians(-arc_degrees + arc_degrees * old_t)
+        new_angle = math.radians(-arc_degrees + arc_degrees * new_t)
+        old_alpha = max_alpha * old_t * old_t
+        new_alpha = max_alpha * new_t * new_t
+        center_alpha = max_alpha * 0.08
+
+        row = i * 3
+        vertices.addData3f(0, 0, 0)
+        colors.addData4f(0, center_alpha, 0, center_alpha)
+        vertices.addData3f(radius * sin(old_angle), 0, radius * cos(old_angle))
+        colors.addData4f(0, old_alpha, 0, old_alpha)
+        vertices.addData3f(radius * sin(new_angle), 0, radius * cos(new_angle))
+        colors.addData4f(0, new_alpha, 0, new_alpha)
+        tris.addVertices(row, row + 1, row + 2)
+
+    geom = Geom(vertex_data)
+    geom.addPrimitive(tris)
+    node = GeomNode("radar-sweep-slice")
+    node.addGeom(geom)
+    return NodePath(node)
 
 
 class MyApp(ShowBase):
@@ -329,6 +419,7 @@ class MyApp(ShowBase):
 
         # render sight
         self.render_sight()
+        self.render_radar()
 
         # Tasks
         for t in tanks_list:
@@ -338,6 +429,7 @@ class MyApp(ShowBase):
         self.taskMgr.add(self.moveTanksTask, "MoveTanksTask")
         self.taskMgr.add(self.moveTask, "MoveTask")
         self.taskMgr.add(self.enemy_shoot_task, "EnemyShoot")
+        self.taskMgr.add(self.updateRadarTask, "UpdateRadarTask")
 
         # base.messenger.toggleVerbose()
 
@@ -460,6 +552,61 @@ class MyApp(ShowBase):
         self.sight_engaged_np.reparentTo(render2d)
         self.sight_engaged_np.hide()
 
+    def render_radar(self):
+        self.radar_np = aspect2d.attachNewNode("Radar")
+        self.radar_np.setPos(-base.getAspectRatio() + RADAR_RADIUS + RADAR_MARGIN,
+                             0,
+                             -1 + RADAR_RADIUS + RADAR_MARGIN)
+
+        frame_lines = procedural_radar_frame(RADAR_RADIUS)
+        frame_lines.setThickness(2)
+        frame_np = self.radar_np.attachNewNode(frame_lines.create())
+        frame_np.setColorScale(0, 0.45, 0, 1.0)
+
+        center_lines = procedural_radar_blip(0.012)
+        center_lines.setThickness(2)
+        center_np = self.radar_np.attachNewNode(center_lines.create())
+        center_np.setColorScale(GG)
+
+        self.radar_sweep_slice = create_radar_sweep_slice(
+            RADAR_RADIUS * 0.9,
+            RADAR_SWEEP_SLICE_DEGREES,
+            RADAR_SWEEP_SLICE_ALPHA
+        )
+        self.radar_sweep_slice.reparentTo(self.radar_np)
+        self.radar_sweep_slice.setTransparency(TransparencyAttrib.MAlpha, 10)
+        self.radar_sweep_slice.setAttrib(ColorBlendAttrib.make(ColorBlendAttrib.MAdd), 10)
+        self.radar_sweep_slice.setDepthWrite(False, 10)
+        self.radar_sweep_slice.setBin("transparent", 0)
+
+        sweep_lines = procedural_radar_sweep(RADAR_RADIUS)
+        self.radar_sweep_nodes = []
+        for idx, (angle_offset, alpha, thickness) in enumerate(RADAR_SWEEP_TRAILS):
+            sweep_lines.setThickness(thickness)
+            sweep_np = self.radar_np.attachNewNode(sweep_lines.create())
+            sweep_np.setName("Radar-Sweep-{}".format(idx))
+            sweep_np.setTransparency(TransparencyAttrib.MAlpha, 10)
+            sweep_np.setAttrib(ColorBlendAttrib.make(ColorBlendAttrib.MAdd), 10)
+            sweep_np.setDepthWrite(False, 10)
+            sweep_np.setColorScale(0, alpha, 0, alpha, 10)
+            self.radar_sweep_nodes.append((sweep_np, angle_offset))
+
+        blip_lines = procedural_radar_blip(0.015)
+        blip_lines.setThickness(3)
+        blip_node = NodePath(blip_lines.create())
+        self.radar_blips = {}
+        self.radar_blip_luminance = {}
+        self.radar_last_update_time = None
+        for t in tanks_list:
+            blip_np = self.radar_np.attachNewNode("Radar-Blip-{}".format(t))
+            blip_node.instanceTo(blip_np)
+            blip_np.setTransparency(TransparencyAttrib.MAlpha, 10)
+            blip_np.setAttrib(ColorBlendAttrib.make(ColorBlendAttrib.MAdd), 10)
+            blip_np.setDepthWrite(False, 10)
+            blip_np.hide()
+            self.radar_blips[t] = blip_np
+            self.radar_blip_luminance[t] = 0
+
     def explosion_cleanup(self, t):
         if t in tanks_list:
             tanks_dict[t]["frags"].hide()
@@ -569,6 +716,62 @@ class MyApp(ShowBase):
         self.sight_engaged_np.hide()
         self.sight_clear_np.show()
         return
+
+    def updateRadarTask(self, task):
+        sweep_time = getattr(task, "time", ClockObject.getGlobalClock().getFrameTime())
+        if self.radar_last_update_time is None:
+            dt = 0
+        else:
+            dt = max(0, sweep_time - self.radar_last_update_time)
+        self.radar_last_update_time = sweep_time
+
+        sweep_angle = (sweep_time * RADAR_SWEEP_SPEED) % 360
+        self.radar_sweep_slice.setR(sweep_angle)
+        for sweep_np, angle_offset in self.radar_sweep_nodes:
+            sweep_np.setR(sweep_angle - angle_offset)
+
+        for t in tanks_list:
+            blip_np = self.radar_blips[t]
+            tank_np = tanks_dict[t]["tank"]
+
+            if tank_np.isHidden():
+                blip_np.hide()
+                self.radar_blip_luminance[t] = 0
+                continue
+
+            rel_pos = self.camera.getRelativePoint(render, tank_np.getPos(render))
+            radar_x = rel_pos[0]
+            radar_y = rel_pos[1]
+            distance = math.sqrt(radar_x ** 2 + radar_y ** 2)
+
+            if distance > 0:
+                scale = min(distance, RADAR_RANGE) / RADAR_RANGE * RADAR_RADIUS
+                radar_x = radar_x / distance * scale
+                radar_y = radar_y / distance * scale
+
+            blip_np.setPos(radar_x, 0, radar_y)
+
+            blip_angle = math.degrees(math.atan2(radar_x, radar_y)) % 360
+            if angular_distance_degrees(sweep_angle, blip_angle) <= RADAR_SCAN_WIDTH_DEGREES:
+                self.radar_blip_luminance[t] = 1.0
+            else:
+                fade = dt / RADAR_BLIP_FADE_SECONDS
+                self.radar_blip_luminance[t] = max(0, self.radar_blip_luminance[t] - fade)
+
+            luminance = self.radar_blip_luminance[t]
+            if luminance <= 0:
+                blip_np.hide()
+                continue
+
+            base_color = tanks_dict[t]["color_scale"]
+            alpha = RADAR_BLIP_IDLE_ALPHA + (1 - RADAR_BLIP_IDLE_ALPHA) * luminance
+            blip_np.setColorScale(base_color[0] * alpha,
+                                  base_color[1] * alpha,
+                                  base_color[2] * alpha,
+                                  alpha)
+            blip_np.show()
+
+        return Task.cont
 
     def moveTanksTask(self, task):
 
