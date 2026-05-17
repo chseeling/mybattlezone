@@ -36,7 +36,7 @@ Or from PowerShell on Windows:
 - R: restart after game over
 
 The lower-left HUD radar shows enemy tank positions relative to your current heading. Enemy returns brighten when scanned, then fade like phosphor.
-
+A stitched HUD panorama shows the forward side views, with a separate rear view below.
 Wireframe blocks, pyramids, and cones act as obstacles. The player is blocked by them, enemy tanks route around their footprints, and shots stop when they hit them.
 
 To show collision debug output:
