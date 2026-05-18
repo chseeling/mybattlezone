@@ -32,11 +32,12 @@ Or from PowerShell on Windows:
 
 - Arrow keys: move and turn
 - Space, F, Ctrl, or left mouse: fire
-- B: toggle bloom
+- B: toggle GPU bloom
 - R: restart after game over
 
 The lower-left HUD radar shows enemy tank positions relative to your current heading. Enemy returns brighten when scanned, then fade like phosphor.
 A stitched HUD panorama shows the forward side views, with a separate rear view below.
+GPU bloom uses a post-process filter for vector glow, falling back to the older geometry bloom if the filter is unavailable.
 Wireframe blocks, pyramids, and cones act as obstacles. The player is blocked by them, enemy tanks route around their footprints, and shots stop when they hit them.
 
 To show collision debug output:

@@ -21,6 +21,7 @@ from panda3d.core import Geom, GeomNode, GeomTriangles, GeomVertexData, GeomVert
 from panda3d.core import LVecBase4, LVecBase2d, InputDevice, WindowProperties, Camera, PerspectiveLens
 
 from direct.gui.OnscreenText import OnscreenText
+from direct.filter.CommonFilters import CommonFilters
 from direct.interval.LerpInterval import LerpPosInterval
 
 
@@ -59,6 +60,13 @@ MOUNTAIN_BLOOM_ALPHA = 0.11
 MOUNTAIN_BLOOM_THICKNESS = 7
 MOUNTAIN_HALO_ALPHA = 0.025
 MOUNTAIN_HALO_THICKNESS = 16
+WORLD_LINE_THICKNESS = 2.4
+GPU_BLOOM_BLEND = (0.08, 1.0, 0.08, 0.0)
+GPU_BLOOM_MIN_TRIGGER = 0.075
+GPU_BLOOM_MAX_TRIGGER = 0.75
+GPU_BLOOM_DESATURATION = 0.0
+GPU_BLOOM_INTENSITY = 0.62
+GPU_BLOOM_SIZE = "medium"
 RADAR_RADIUS = 0.18
 RADAR_RANGE = 120
 RADAR_MARGIN = 0.12
@@ -477,7 +485,7 @@ class MyApp(ShowBase):
         with open('models/tank_round.json', "r") as f:
             data = json.load(f)
         lines = create_lineSegs_object(data, 0)
-        lines.setThickness(3)
+        lines.setThickness(WORLD_LINE_THICKNESS)
 
         gn_round = lines.create()
         np_round = NodePath(gn_round)
@@ -585,6 +593,8 @@ class MyApp(ShowBase):
         self.render_radar()
         self.render_player_hud()
         self.render_auxiliary_views()
+        self.display_filters = CommonFilters(base.win, base.cam)
+        self.gpu_bloom_available = True
 
         # Tasks
         for t in tanks_list:
@@ -649,14 +659,35 @@ class MyApp(ShowBase):
     def set_bloom_enabled(self, enabled):
         self.bloom_enabled = enabled
         auxiliary_camera_mask = BitMask32.bit(1)
+        gpu_bloom_on = False
+
+        if enabled:
+            gpu_bloom_on = self.display_filters.setBloom(
+                blend=GPU_BLOOM_BLEND,
+                mintrigger=GPU_BLOOM_MIN_TRIGGER,
+                maxtrigger=GPU_BLOOM_MAX_TRIGGER,
+                desat=GPU_BLOOM_DESATURATION,
+                intensity=GPU_BLOOM_INTENSITY,
+                size=GPU_BLOOM_SIZE
+            )
+        else:
+            self.display_filters.delBloom()
+
+        self.gpu_bloom_available = enabled and gpu_bloom_on
+
         for node in self.bloom_nodes():
-            if enabled:
+            if enabled and not self.gpu_bloom_available:
                 node.show()
                 node.hide(auxiliary_camera_mask)
             else:
                 node.hide()
 
-        self.bloomTextObject.text = "BLOOM ON" if enabled else "BLOOM OFF"
+        if self.gpu_bloom_available:
+            self.bloomTextObject.text = "GPU BLOOM"
+        elif enabled:
+            self.bloomTextObject.text = "BLOOM FALLBACK"
+        else:
+            self.bloomTextObject.text = "BLOOM OFF"
 
     def toggle_bloom(self):
         self.set_bloom_enabled(not self.bloom_enabled)
@@ -750,7 +781,7 @@ class MyApp(ShowBase):
         n = 2  # number of repeats in circumference
         data['points'] = map_mountains(data['points'], n)
 
-        mountain_core = create_line_nodepath(data, 1, "mountain-core-lines", 3)
+        mountain_core = create_line_nodepath(data, 1, "mountain-core-lines", WORLD_LINE_THICKNESS)
         mountain_bloom = create_line_nodepath(data, 1, "mountain-bloom-lines", MOUNTAIN_BLOOM_THICKNESS)
         mountain_halo = create_line_nodepath(data, 1, "mountain-halo-lines", MOUNTAIN_HALO_THICKNESS)
         scale = 7000
@@ -782,7 +813,7 @@ class MyApp(ShowBase):
 
         for obstacle in OBSTACLES:
             lines = factories[obstacle["kind"]]()
-            lines.setThickness(3)
+            lines.setThickness(WORLD_LINE_THICKNESS)
             node_path = NodePath(lines.create())
             face_path = create_structure_faces(obstacle["kind"])
             placeholder = self.obstacle_group.attachNewNode(obstacle["name"])
@@ -1049,7 +1080,7 @@ class MyApp(ShowBase):
         with open('models/tankDesignB.json', "r") as f:
             data = json.load(f)
         lines = create_lineSegs_object(data, 0)
-        lines.setThickness(3)
+        lines.setThickness(WORLD_LINE_THICKNESS)
         node = lines.create()
         self.tank = NodePath(node)
 
@@ -1068,7 +1099,7 @@ class MyApp(ShowBase):
             for frag in data:
                 # print(frag["name"])
                 lines = create_lineSegs_object(frag["model"], 0, frag["name"])
-                lines.setThickness(3)
+                lines.setThickness(WORLD_LINE_THICKNESS)
                 node = lines.create()
                 np = tanks_dict[t]["frags"].attachNewNode(node)
                 i = ProjectileInterval(np, startPos=np.getPos(), endZ=0,
