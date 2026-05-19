@@ -91,6 +91,9 @@ INVESTIGATE_WINDOW_SECONDS = 4.0
 INVESTIGATE_FATAL_WINDOW_SECONDS = 999999.0
 INVESTIGATION_GHOST_SPEED = 51.0
 INVESTIGATION_GHOST_HEIGHT = 5.0
+INVESTIGATION_DRONE_ORBIT_RADIUS = 48.0
+INVESTIGATION_DRONE_ORBIT_ALTITUDE = 18.0
+INVESTIGATION_DRONE_ORBIT_SPEED = 18.0
 SHOT_DEFLECTION_CLEARANCE = 0.25
 MAIN_CAMERA_MASK = BitMask32.bit(0)
 AUX_CAMERA_MASK = BitMask32.bit(1)
@@ -690,6 +693,7 @@ class MyApp(ShowBase):
         # base.messenger.toggleVerbose()
 
         self.bloom_enabled = True
+        self.accept('enter', self.start_game)
         self.accept('space', self.shoot)
         self.accept('space-up', self.shot_clear)
         self.accept('f', self.shoot)
@@ -703,6 +707,7 @@ class MyApp(ShowBase):
         self.accept('d', self.toggle_recon_drone)
         self.accept('i', self.toggle_investigation)
         self.accept('r', self.restart_game)
+        self.accept('window-event', self.handle_window_event)
 
         self.accept('into-' + 'cmTank', self.struck)
         for t in tanks_list:
@@ -724,7 +729,6 @@ class MyApp(ShowBase):
         self.set_bloom_enabled(self.bloom_enabled)
 
         self.ambient_snd.setLoop(True)
-        self.ambient_snd.play()
 
         # mainShot_snd.setLoop(True)
 
@@ -860,7 +864,6 @@ class MyApp(ShowBase):
             return
 
         self.investigation_marker_root = render.attachNewNode("InvestigationMarkers")
-        self.investigation_marker_root.hide(DRONE_CAMERA_MASK)
         trajectory = LineSegs("InvestigationTrajectory")
         trajectory.setThickness(5)
         trajectory.setColor(1.0, 0.05, 0.02, 1)
@@ -894,6 +897,112 @@ class MyApp(ShowBase):
 
         self.investigation_highlight_tank = None
         self.investigation_highlight_color = None
+
+    def get_investigation_scene_center(self):
+        if not self.last_player_hit_event:
+            return Point3(self.camera.getPos(render))
+
+        event = self.last_player_hit_event
+        points = [
+            Point3(event["shot_start"]),
+            Point3(event["shot_end"]),
+            Point3(event["player_pos"]),
+            Point3(event["shooter_pos"]),
+        ]
+        center = Point3(0, 0, 3.0)
+        for point in points:
+            center[0] += point[0]
+            center[1] += point[1]
+        center[0] /= len(points)
+        center[1] /= len(points)
+        return center
+
+    def save_real_drone_for_investigation(self):
+        if self.investigation_drone_saved_state is not None:
+            return
+
+        self.investigation_drone_saved_state = {
+            "drone_hidden": self.recon_drone_np.isHidden(),
+            "drone_pos": Point3(self.recon_drone_np.getPos(render)),
+            "drone_hpr": self.recon_drone_np.getHpr(render),
+            "camera_pos": Point3(self.drone_camera_np.getPos(render)),
+            "camera_hpr": self.drone_camera_np.getHpr(render),
+            "camera_heading": self.drone_camera_heading,
+            "camera_pitch": self.drone_camera_pitch,
+        }
+
+    def restore_real_drone_after_investigation(self):
+        if self.investigation_drone_saved_state is None:
+            return
+
+        saved = self.investigation_drone_saved_state
+        self.recon_drone_np.setPos(render, saved["drone_pos"])
+        self.recon_drone_np.setHpr(render, saved["drone_hpr"])
+        if saved["drone_hidden"]:
+            self.recon_drone_np.hide()
+        else:
+            self.recon_drone_np.show()
+        self.recon_drone_np.hide(DRONE_CAMERA_MASK)
+        self.drone_camera_np.setPos(render, saved["camera_pos"])
+        self.drone_camera_np.setHpr(render, saved["camera_hpr"])
+        self.drone_camera_heading = saved["camera_heading"]
+        self.drone_camera_pitch = saved["camera_pitch"]
+        self.investigation_drone_saved_state = None
+
+    def toggle_investigation_drone(self):
+        if self.investigation_drone_active:
+            self.investigation_drone_active = False
+            self.restore_real_drone_after_investigation()
+            self.update_drone_status_hud()
+            return
+
+        self.save_real_drone_for_investigation()
+        self.investigation_drone_active = True
+        self.investigation_drone_elapsed = 0
+        self.investigation_drone_focus = None
+        self.recon_drone_np.show()
+        self.recon_drone_np.hide(DRONE_CAMERA_MASK)
+        self.update_drone_status_hud()
+
+    def update_investigation_drone(self, dt):
+        if not self.investigation_drone_active:
+            return
+
+        self.investigation_drone_elapsed += dt
+        event = self.last_player_hit_event
+        if not event:
+            return
+
+        shot_start = Point3(event["shot_start"])
+        shot_end = Point3(event["shot_end"])
+        player_pos = Point3(event["player_pos"])
+        shooter_pos = Point3(event["shooter_pos"])
+        focus_point = Point3(
+            (shot_start[0] + shot_end[0] + player_pos[0] + shooter_pos[0]) * 0.25,
+            (shot_start[1] + shot_end[1] + player_pos[1] + shooter_pos[1]) * 0.25,
+            0.35
+        )
+        orbit_angle = math.radians(self.investigation_drone_elapsed * INVESTIGATION_DRONE_ORBIT_SPEED)
+        orbit_radius = INVESTIGATION_DRONE_ORBIT_RADIUS * (0.92 + 0.08 * math.sin(self.investigation_drone_elapsed * 0.37))
+        orbit_x = math.sin(orbit_angle)
+        orbit_y = math.cos(orbit_angle)
+        drone_pos = Point3(
+            focus_point[0] + orbit_x * orbit_radius,
+            focus_point[1] + orbit_y * orbit_radius,
+            INVESTIGATION_DRONE_ORBIT_ALTITUDE + 3.0 * math.sin(self.investigation_drone_elapsed * 0.41)
+        )
+        self.investigation_drone_focus = Point3(focus_point)
+        body_dx = focus_point[0] - drone_pos[0]
+        body_dy = focus_point[1] - drone_pos[1]
+        self.drone_heading = math.degrees(math.atan2(body_dx, body_dy))
+        self.recon_drone_np.setPos(render, drone_pos)
+        self.recon_drone_np.setHpr(render, self.drone_heading, -4, 0)
+        self.hide_recon_drone_from_fpv()
+        self.drone_camera_np.setPos(render, drone_pos)
+        self.drone_camera_np.lookAt(render, focus_point)
+        hpr = self.drone_camera_np.getHpr(render)
+        self.drone_camera_heading = hpr[0]
+        self.drone_camera_pitch = hpr[1]
 
     def stop_battle_sounds_for_investigation(self):
         self.ambient_snd.stop()
@@ -936,6 +1045,9 @@ class MyApp(ShowBase):
         self.investigation_saved_camera_pos = None
         self.investigation_saved_camera_hpr = None
         self.resume_simulation_intervals()
+        self.investigation_drone_active = False
+        self.investigation_drone_focus = None
+        self.restore_real_drone_after_investigation()
         self.clear_investigation_markers()
         self.last_player_hit_event = None
         self.investigateTextObject.hide()
@@ -989,6 +1101,7 @@ class MyApp(ShowBase):
 
     def end_game(self):
         self.game_over = True
+        self.waiting_to_start = False
         if self.last_player_hit_event:
             self.gameOverTextObject.text = "GAME OVER\nI TO INVESTIGATE\nR TO RESTART"
         else:
@@ -1001,6 +1114,14 @@ class MyApp(ShowBase):
         for t in tanks_list:
             tanks_dict[t]["move"] = False
             tanks_dict[t]["shooting"] = False
+
+    def start_game(self):
+        if not self.waiting_to_start:
+            return
+
+        self.waiting_to_start = False
+        self.startTextObject.hide()
+        self.ambient_snd.play()
 
     def restart_game(self):
         if not self.game_over:
@@ -1019,6 +1140,7 @@ class MyApp(ShowBase):
         self.last_player_hit_time = -PLAYER_HIT_COOLDOWN
         self.hit_flash_alpha = 0
         self.gameOverTextObject.hide()
+        self.startTextObject.hide()
         self.hitFlashNp.hide()
         self.investigation_snd.stop()
         self.gameOver_snd.stop()
@@ -1052,13 +1174,21 @@ class MyApp(ShowBase):
         return Task.cont
 
     def enemy_shoot_task(self, task):
-        if self.game_over or self.investigation_mode:
+        if self.waiting_to_start or self.game_over or self.investigation_mode:
             return Task.cont
 
         for t in tanks_list:
-            ShootAt = tanks_dict[t]["tank"].getRelativePoint(self.camera, (0 + random(), 0 + random(), 0 + random()))
+            aim_jitter = 0.18
+            ShootAt = tanks_dict[t]["tank"].getRelativePoint(
+                self.camera,
+                (
+                    (random() - 0.5) * aim_jitter,
+                    (random() - 0.5) * aim_jitter,
+                    (random() - 0.5) * aim_jitter
+                )
+            )
             ShootAt = LVecBase2d(ShootAt[0], ShootAt[1]).normalized()
-            if ShootAt[0] > 0.99999 and not tanks_dict[t]["shooting"]:
+            if ShootAt[0] > 0.99995 and not tanks_dict[t]["shooting"]:
                 print('Tank {} shooting'.format(t))
                 tanks_dict[t]["shooting"] = True
                 tanks_dict[t]["round"].wrtReparentTo(render)
@@ -1221,6 +1351,7 @@ class MyApp(ShowBase):
             self.radar_blip_luminance[t] = 0
 
     def render_player_hud(self):
+        self.waiting_to_start = True
         self.player_lives = PLAYER_MAX_LIVES
         self.game_over = False
         self.last_player_hit_time = -PLAYER_HIT_COOLDOWN
@@ -1234,6 +1365,10 @@ class MyApp(ShowBase):
         self.investigation_highlight_tank = None
         self.investigation_highlight_color = None
         self.investigation_paused_intervals = []
+        self.investigation_drone_active = False
+        self.investigation_drone_elapsed = 0
+        self.investigation_drone_focus = None
+        self.investigation_drone_saved_state = None
         self.player_shot_interval = None
         self.player_shot_deflected = False
 
@@ -1247,6 +1382,12 @@ class MyApp(ShowBase):
                                                fg=(0.4, 1.0, 0.4, 1), mayChange=True)
         self.gameOverTextObject.reparentTo(aspect2d)
         self.gameOverTextObject.hide()
+
+        self.startTextObject = OnscreenText(text="BATTLEZONE\nPRESS ENTER OR SPACE",
+                                            pos=(0, 0.12),
+                                            align=TextNode.ACenter, scale=(0.075, 0.1),
+                                            fg=(0.4, 1.0, 0.4, 1), mayChange=True)
+        self.startTextObject.reparentTo(aspect2d)
 
         card = CardMaker("player-hit-flash")
         card.setFrameFullscreenQuad()
@@ -1434,11 +1575,35 @@ class MyApp(ShowBase):
         self.drone_camera_np = render.attachNewNode(drone_camera_node)
         self.drone_display_region.setCamera(self.drone_camera_np)
 
-        aspect = base.getAspectRatio()
-        x0 = (slot_left * 2 - 1) * aspect
-        x1 = (slot_right * 2 - 1) * aspect
+        self.drone_frame_np = render2d.attachNewNode("ReconDroneViewFrame")
+        self.update_drone_view_overlay()
+
+        self.droneTextObject = OnscreenText(text="", pos=(0, 0),
+                                            align=TextNode.ALeft, scale=(0.027, 0.042),
+                                            fg=(0.25, 0.65, 1.0, 1), mayChange=True)
+        self.droneTextObject.reparentTo(render2d)
+        self.droneTitleObject = OnscreenText(text="DRONE FEED", pos=(0, 0),
+                                             align=TextNode.ACenter, scale=(0.034, 0.052),
+                                             fg=(0.35, 0.95, 1.0, 1), mayChange=True)
+        self.droneTitleObject.reparentTo(render2d)
+        self.update_drone_view_overlay()
+        self.update_drone_status_hud()
+        self.update_drone_home_marker()
+
+    def get_drone_view_bounds(self):
+        slot_left, slot_right, slot_bottom, slot_top = DRONE_VIEW_SLOT
+        x0 = slot_left * 2 - 1
+        x1 = slot_right * 2 - 1
         z0 = slot_bottom * 2 - 1
         z1 = slot_top * 2 - 1
+        return x0, x1, z0, z1
+
+    def update_drone_view_overlay(self):
+        if not hasattr(self, "drone_frame_np"):
+            return
+
+        x0, x1, z0, z1 = self.get_drone_view_bounds()
+        self.drone_frame_np.node().removeAllChildren()
         frame = LineSegs("ReconDroneViewFrame")
         frame.setThickness(2)
         frame.moveTo(x0, 0, z0)
@@ -1446,15 +1611,25 @@ class MyApp(ShowBase):
         frame.drawTo(x1, 0, z1)
         frame.drawTo(x0, 0, z1)
         frame.drawTo(x0, 0, z0)
-        frame_np = aspect2d.attachNewNode(frame.create())
-        frame_np.setColorScale(DRONE_BLUE)
+        self.drone_frame_np.attachNewNode(frame.create())
+        self.drone_frame_np.setColorScale(DRONE_BLUE)
 
-        self.droneTextObject = OnscreenText(text="", pos=(x0 + 0.02, z1 - 0.045),
-                                            align=TextNode.ALeft, scale=(0.027, 0.042),
-                                            fg=(0.25, 0.65, 1.0, 1), mayChange=True)
-        self.droneTextObject.reparentTo(aspect2d)
-        self.update_drone_status_hud()
-        self.update_drone_home_marker()
+        if hasattr(self, "droneTextObject"):
+            self.droneTextObject.setPos(x0 + 0.11, z1 - 0.085)
+
+        if hasattr(self, "droneTitleObject"):
+            self.droneTitleObject.setPos((x0 + x1) * 0.5, z1 + 0.065)
+
+        if hasattr(self, "drone_camera_np"):
+            slot_left, slot_right, slot_bottom, slot_top = DRONE_VIEW_SLOT
+            lens = self.drone_camera_np.node().getLens()
+            lens.setAspectRatio((slot_right - slot_left) * base.getAspectRatio() / (slot_top - slot_bottom))
+
+    def handle_window_event(self, window):
+        if window != base.win:
+            return
+
+        self.update_drone_view_overlay()
 
     def hide_bloom_from_auxiliary_views(self):
         camera_mask = AUX_CAMERA_MASK | DRONE_CAMERA_MASK
@@ -1475,6 +1650,10 @@ class MyApp(ShowBase):
 
     def update_drone_status_hud(self):
         if hasattr(self, "droneTextObject"):
+            if self.investigation_mode and self.investigation_drone_active:
+                self.droneTextObject.text = "DRONE GHOST\nBAT ---%\nKILL SCENE"
+                return
+
             target_text = "TGT {}".format(self.drone_target_id) if self.drone_target_id else "HOME TANK"
             self.droneTextObject.text = "DRONE {}\nBAT {:03.0f}%\n{}".format(
                 self.drone_state,
@@ -1605,7 +1784,11 @@ class MyApp(ShowBase):
         )
 
     def toggle_recon_drone(self):
+        if self.waiting_to_start:
+            return
+
         if self.investigation_mode:
+            self.toggle_investigation_drone()
             return
 
         if self.drone_state in {"OUTBOUND", "RETURNING"}:
@@ -1635,10 +1818,15 @@ class MyApp(ShowBase):
         self.update_drone_status_hud()
 
     def updateReconDroneTask(self, task):
-        if self.investigation_mode:
+        dt = min(ClockObject.getGlobalClock().getDt(), 0.05)
+        if self.waiting_to_start:
             return Task.cont
 
-        dt = min(ClockObject.getGlobalClock().getDt(), 0.05)
+        if self.investigation_mode:
+            self.update_investigation_drone(dt)
+            self.update_drone_status_hud()
+            return Task.cont
+
         self.update_drone_home_marker()
 
         home_pos = Point3(self.camera.getPos(render))
@@ -2014,6 +2202,9 @@ class MyApp(ShowBase):
 
     def moveTask(self, task):
         dt = min(ClockObject.getGlobalClock().getDt(), 0.05)
+        if self.waiting_to_start:
+            return Task.cont
+
         if self.investigation_mode:
             self.move_investigation_camera(dt)
             return Task.cont
@@ -2065,6 +2256,10 @@ class MyApp(ShowBase):
         tanks_dict[t]["shooting"] = False
 
     def shoot(self):
+        if self.waiting_to_start:
+            self.start_game()
+            return
+
         if self.game_over or self.investigation_mode:
             return
 
@@ -2115,6 +2310,9 @@ class MyApp(ShowBase):
         return
 
     def updateRadarTask(self, task):
+        if self.waiting_to_start:
+            return Task.cont
+
         if self.investigation_mode:
             return Task.cont
 
@@ -2174,6 +2372,9 @@ class MyApp(ShowBase):
         return Task.cont
 
     def moveTanksTask(self, task):
+        if self.waiting_to_start:
+            return Task.cont
+
         if self.investigation_mode:
             return Task.cont
 
@@ -2210,6 +2411,9 @@ class MyApp(ShowBase):
 
     # Define a procedure to move the camera.
     def spinCameraTask(self, task):
+        if self.waiting_to_start:
+            return Task.cont
+
         if self.investigation_mode:
             return Task.cont
 
