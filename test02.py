@@ -31,7 +31,7 @@ arrow_left = KeyboardButton.left()
 arrow_back = KeyboardButton.down()
 arrow_forward = KeyboardButton.up()
 GG = LVecBase4(0, 1, 0, 1)  # game green constant
-camera_dict = {"turn_ang_vel": 0.36, "translate_vel": 0.5}
+camera_dict = {"turn_ang_vel": 21.6, "translate_vel": 30.0}
 NUMET = 2  # number of enemy tanks
 tanks_dict = {"0": {},
               "1": {"init_pos": Point3(30, 50, 0),
@@ -89,7 +89,7 @@ PLAYER_COLLISION_RADIUS = 1.5
 TANK_COLLISION_RADIUS = 1.6
 INVESTIGATE_WINDOW_SECONDS = 4.0
 INVESTIGATE_FATAL_WINDOW_SECONDS = 999999.0
-INVESTIGATION_GHOST_SPEED = 0.85
+INVESTIGATION_GHOST_SPEED = 51.0
 INVESTIGATION_GHOST_HEIGHT = 5.0
 SHOT_DEFLECTION_CLEARANCE = 0.25
 MAIN_CAMERA_MASK = BitMask32.bit(0)
@@ -860,7 +860,7 @@ class MyApp(ShowBase):
             return
 
         self.investigation_marker_root = render.attachNewNode("InvestigationMarkers")
-        self.investigation_marker_root.hide(AUX_CAMERA_MASK | DRONE_CAMERA_MASK)
+        self.investigation_marker_root.hide(DRONE_CAMERA_MASK)
         trajectory = LineSegs("InvestigationTrajectory")
         trajectory.setThickness(5)
         trajectory.setColor(1.0, 0.05, 0.02, 1)
@@ -962,6 +962,8 @@ class MyApp(ShowBase):
         from_name = entry.getFromNodePath().node().name
         if from_name.startswith("ceTankRound"):
             shooter_id = from_name[-1]
+            if tanks_dict[shooter_id].get("shot_deflected", False):
+                return
             shot_start = tanks_dict[shooter_id].get("shot_start", tanks_dict[shooter_id]["round"].getPos(render))
             try:
                 shot_end = entry.getSurfacePoint(render)
@@ -1933,16 +1935,24 @@ class MyApp(ShowBase):
                     }
         return closest_hit
 
-    def create_shot_interval(self, round_np, start, direction, distance, duration, done_event):
+    def create_shot_interval(self, round_np, start, direction, distance, duration, done_event, collision_start=None):
         shot_dir = self.normalize3(direction)
+        if collision_start is None:
+            collision_start = start
+        collision_start = Point3(collision_start)
+        visible_offset = max(0, self.dot3(start - collision_start, shot_dir))
+        collision_distance = visible_offset + distance
+        collision_end = Point3(collision_start + shot_dir * collision_distance)
         raw_end = Point3(start + shot_dir * distance)
-        hit = self.find_shot_obstacle_hit(start, raw_end)
+        hit = self.find_shot_obstacle_hit(collision_start, collision_end)
         if not hit:
             interval = LerpPosInterval(round_np, duration, pos=raw_end)
             interval.setDoneEvent(done_event)
             return interval, raw_end, False
 
         impact = hit["point"]
+        hit_distance = collision_distance * hit["t"]
+        visible_distance_to_impact = hit_distance - visible_offset
         normal = hit["normal"]
         reflected_dir = Point3(
             shot_dir[0] - 2 * self.dot3(shot_dir, normal) * normal[0],
@@ -1950,15 +1960,20 @@ class MyApp(ShowBase):
             shot_dir[2] - 2 * self.dot3(shot_dir, normal) * normal[2]
         )
         reflected_dir = self.normalize3(reflected_dir)
-        remaining_distance = distance * (1 - hit["t"])
+        remaining_distance = max(0, collision_distance - hit_distance)
         reflected_start = Point3(impact + reflected_dir * SHOT_DEFLECTION_CLEARANCE)
         reflected_end = Point3(reflected_start + reflected_dir * remaining_distance)
-        first_duration = max(0.03, duration * hit["t"])
-        second_duration = max(0.03, duration - first_duration)
-        interval = Sequence(
-            LerpPosInterval(round_np, first_duration, pos=impact),
-            LerpPosInterval(round_np, second_duration, pos=reflected_end)
-        )
+
+        if visible_distance_to_impact <= SHOT_DEFLECTION_CLEARANCE:
+            round_np.setPos(render, impact)
+            interval = LerpPosInterval(round_np, duration, pos=reflected_end)
+        else:
+            first_duration = max(0.03, duration * min(1, visible_distance_to_impact / distance))
+            second_duration = max(0.03, duration - first_duration)
+            interval = Sequence(
+                LerpPosInterval(round_np, first_duration, pos=impact),
+                LerpPosInterval(round_np, second_duration, pos=reflected_end)
+            )
         interval.setDoneEvent(done_event)
         return interval, reflected_end, True
 
@@ -1981,40 +1996,45 @@ class MyApp(ShowBase):
                     return
                 self.enemy_reset_shot(t)
 
-    def move_investigation_camera(self):
+    def move_investigation_camera(self, dt):
         is_down = base.mouseWatcherNode.is_button_down
+        turn_step = camera_dict["turn_ang_vel"] * dt
+        move_step = INVESTIGATION_GHOST_SPEED * dt
 
         if is_down(arrow_right):
-            self.camera.setHpr(self.camera, -camera_dict["turn_ang_vel"], 0, 0)
+            self.camera.setHpr(self.camera, -turn_step, 0, 0)
         if is_down(arrow_left):
-            self.camera.setHpr(self.camera, camera_dict["turn_ang_vel"], 0, 0)
+            self.camera.setHpr(self.camera, turn_step, 0, 0)
         if is_down(arrow_back):
-            step = render.getRelativeVector(self.camera, (0, -INVESTIGATION_GHOST_SPEED, 0))
+            step = render.getRelativeVector(self.camera, (0, -move_step, 0))
             self.camera.setPos(render, self.camera.getPos(render) + step)
         if is_down(arrow_forward):
-            step = render.getRelativeVector(self.camera, (0, INVESTIGATION_GHOST_SPEED, 0))
+            step = render.getRelativeVector(self.camera, (0, move_step, 0))
             self.camera.setPos(render, self.camera.getPos(render) + step)
 
     def moveTask(self, task):
+        dt = min(ClockObject.getGlobalClock().getDt(), 0.05)
         if self.investigation_mode:
-            self.move_investigation_camera()
+            self.move_investigation_camera(dt)
             return Task.cont
 
         if self.game_over:
             return Task.cont
 
         is_down = base.mouseWatcherNode.is_button_down
+        turn_step = camera_dict["turn_ang_vel"] * dt
+        move_step = camera_dict["translate_vel"] * dt
 
         if is_down(arrow_right):
-            self.camera.setHpr(self.camera, -camera_dict["turn_ang_vel"], 0, 0)
+            self.camera.setHpr(self.camera, -turn_step, 0, 0)
         if is_down(arrow_left):
-            self.camera.setHpr(self.camera, camera_dict["turn_ang_vel"], 0, 0)
+            self.camera.setHpr(self.camera, turn_step, 0, 0)
         if is_down(arrow_back):
-            step = render.getRelativeVector(self.camera, (0, -camera_dict["translate_vel"], 0))
+            step = render.getRelativeVector(self.camera, (0, -move_step, 0))
             next_pos = self.resolve_obstacle_position(self.camera.getPos(render) + step, PLAYER_COLLISION_RADIUS)
             self.camera.setPos(render, next_pos)
         if is_down(arrow_forward):
-            step = render.getRelativeVector(self.camera, (0, camera_dict["translate_vel"], 0))
+            step = render.getRelativeVector(self.camera, (0, move_step, 0))
             next_pos = self.resolve_obstacle_position(self.camera.getPos(render) + step, PLAYER_COLLISION_RADIUS)
             self.camera.setPos(render, next_pos)
         return Task.cont
@@ -2066,7 +2086,8 @@ class MyApp(ShowBase):
             ShootAt,
             200,
             1.1,
-            'shot-done'
+            'shot-done',
+            self.camera.getPos(render)
         )
         self.player_shot_interval = i
         self.player_shot_deflected = shot_deflected
@@ -2076,6 +2097,8 @@ class MyApp(ShowBase):
 
     def tank0_round_hit(self, entry):
         if entry.getIntoNodePath().node().name[:5] == 'cTank':
+            if self.player_shot_deflected:
+                return
             t = entry.getIntoNodePath().node().name[5:6]
             print('hit tank ' + t)
             tanks_dict[t]["move"] = False
