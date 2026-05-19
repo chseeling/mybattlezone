@@ -510,6 +510,113 @@ def create_radar_sweep_slice(radius, arc_degrees, max_alpha, segments=18):
     return NodePath(node)
 
 
+class TankCommand:
+    def __init__(self, throttle=0.0, turn=0.0, fire=False,
+                 desired_world_pos=None, desired_heading=None):
+        self.throttle = throttle
+        self.turn = turn
+        self.fire = fire
+        self.desired_world_pos = desired_world_pos
+        self.desired_heading = desired_heading
+
+
+class TankAvatar:
+    def __init__(self, tank_id, node, locator=None, collision_radius=TANK_COLLISION_RADIUS):
+        self.tank_id = tank_id
+        self.node = node
+        self.locator = locator
+        self.collision_radius = collision_radius
+
+    def get_pos(self):
+        return self.node.getPos(render)
+
+    def get_hpr(self):
+        return self.node.getHpr(render)
+
+    def is_hidden(self):
+        return self.node.isHidden()
+
+
+class TankController:
+    def command(self, app, avatar, dt, task_time):
+        return TankCommand()
+
+
+class HumanTankController(TankController):
+    def __init__(self):
+        self.fire_requested = False
+
+    def request_fire(self):
+        self.fire_requested = True
+
+    def command(self, app, avatar, dt, task_time):
+        fire = self.fire_requested
+        self.fire_requested = False
+        if base.mouseWatcherNode is None:
+            return TankCommand(fire=fire)
+
+        is_down = base.mouseWatcherNode.is_button_down
+        turn = 0.0
+        throttle = 0.0
+        if is_down(arrow_right):
+            turn -= 1.0
+        if is_down(arrow_left):
+            turn += 1.0
+        if is_down(arrow_back):
+            throttle -= 1.0
+        if is_down(arrow_forward):
+            throttle += 1.0
+
+        return TankCommand(throttle=throttle, turn=turn, fire=fire)
+
+
+class SineAiTankController(TankController):
+    def __init__(self, tank_id):
+        self.tank_id = tank_id
+
+    def command(self, app, avatar, dt, task_time):
+        tank_state = tanks_dict[self.tank_id]
+        if not tank_state["move"] or avatar.is_hidden():
+            return TankCommand()
+
+        move_params = tank_state["move_params"]
+        Ax = move_params["Ax"]
+        Ay = move_params["Ay"]
+        Bx = move_params["Bx"]
+        By = move_params["By"]
+        phix = move_params["phix"]
+        phiy = move_params["phiy"]
+
+        x = Ax * sin(Bx * task_time) + phix
+        y = Ay * sin(By * task_time) + phiy
+        dx = Ax * Bx * cos(Bx * task_time)
+        dy = Ay * By * cos(By * task_time)
+        heading = math.degrees(math.atan2(dy, dx))
+        desired_world = render.getRelativePoint(avatar.locator, Point3(x, y, 0))
+
+        return TankCommand(
+            desired_world_pos=desired_world,
+            desired_heading=heading,
+            fire=self.should_fire(app, avatar)
+        )
+
+    def should_fire(self, app, avatar):
+        if tanks_dict[self.tank_id]["shooting"]:
+            return False
+
+        aim_jitter = 0.18
+        shoot_at = avatar.node.getRelativePoint(
+            app.camera,
+            (
+                (random() - 0.5) * aim_jitter,
+                (random() - 0.5) * aim_jitter,
+                (random() - 0.5) * aim_jitter
+            )
+        )
+        shoot_at = LVecBase2d(shoot_at[0], shoot_at[1]).normalized()
+        return shoot_at[0] > 0.99995
+
+
 class MyApp(ShowBase):
     def __init__(self):
         ShowBase.__init__(self)
@@ -680,11 +787,10 @@ class MyApp(ShowBase):
         # Tasks
         for t in tanks_list:
             tanks_dict[t]["move"] = True
+        self.setup_tank_control_architecture()
 
         self.taskMgr.add(self.spinCameraTask, "SpinCameraTask")
-        self.taskMgr.add(self.moveTanksTask, "MoveTanksTask")
-        self.taskMgr.add(self.moveTask, "MoveTask")
-        self.taskMgr.add(self.enemy_shoot_task, "EnemyShoot")
+        self.taskMgr.add(self.updateTankControllersTask, "UpdateTankControllersTask")
         self.taskMgr.add(self.updateRadarTask, "UpdateRadarTask")
         self.taskMgr.add(self.updatePlayerFeedbackTask, "UpdatePlayerFeedbackTask")
         self.taskMgr.add(self.updateAuxiliaryViewsTask, "UpdateAuxiliaryViewsTask")
@@ -694,13 +800,13 @@ class MyApp(ShowBase):
 
         self.bloom_enabled = True
         self.accept('enter', self.start_game)
-        self.accept('space', self.shoot)
+        self.accept('space', self.request_player_fire)
         self.accept('space-up', self.shot_clear)
-        self.accept('f', self.shoot)
+        self.accept('f', self.request_player_fire)
         self.accept('f-up', self.shot_clear)
-        self.accept('mouse1', self.shoot)
+        self.accept('mouse1', self.request_player_fire)
         self.accept('mouse1-up', self.shot_clear)
-        self.accept('control', self.shoot)
+        self.accept('control', self.request_player_fire)
         self.accept('control-up', self.shot_clear)
         self.accept('shot-done', self.reset_shot)
         self.accept('b', self.toggle_bloom)
@@ -733,6 +839,24 @@ class MyApp(ShowBase):
         # mainShot_snd.setLoop(True)
 
         # sfxMgr = base.sfxManagerList[0]
+
+    def setup_tank_control_architecture(self):
+        self.tank_avatars = {
+            "0": TankAvatar("0", self.camera, collision_radius=PLAYER_COLLISION_RADIUS)
+        }
+        self.human_tank_controller = HumanTankController()
+        self.tank_controllers = {
+            "0": self.human_tank_controller
+        }
+
+        for t in tanks_list:
+            self.tank_avatars[t] = TankAvatar(
+                t,
+                tanks_dict[t]["tank"],
+                locator=tanks_dict[t]["Locator"],
+                collision_radius=TANK_COLLISION_RADIUS
+            )
+            self.tank_controllers[t] = SineAiTankController(t)
 
     def bloom_nodes(self):
         nodes = []
@@ -1171,46 +1295,6 @@ class MyApp(ShowBase):
         else:
             self.hitFlashNp.hide()
 
-        return Task.cont
-
-    def enemy_shoot_task(self, task):
-        if self.waiting_to_start or self.game_over or self.investigation_mode:
-            return Task.cont
-
-        for t in tanks_list:
-            aim_jitter = 0.18
-            ShootAt = tanks_dict[t]["tank"].getRelativePoint(
-                self.camera,
-                (
-                    (random() - 0.5) * aim_jitter,
-                    (random() - 0.5) * aim_jitter,
-                    (random() - 0.5) * aim_jitter
-                )
-            )
-            ShootAt = LVecBase2d(ShootAt[0], ShootAt[1]).normalized()
-            if ShootAt[0] > 0.99995 and not tanks_dict[t]["shooting"]:
-                print('Tank {} shooting'.format(t))
-                tanks_dict[t]["shooting"] = True
-                tanks_dict[t]["round"].wrtReparentTo(render)
-                ShootAt = render.getRelativeVector(tanks_dict[t]["tank"], (1, 0, 0))
-                shot_start = Point3(tanks_dict[t]["round"].getPos(render))
-                shot_end = shot_start + ShootAt * 300
-                tanks_dict[t]["shot_start"] = shot_start
-                tanks_dict[t]["shot_shooter_pos"] = Point3(tanks_dict[t]["tank"].getPos(render))
-                tanks_dict[t]["shot_shooter_hpr"] = tanks_dict[t]["tank"].getHpr(render)
-                i, shot_end, shot_deflected = self.create_shot_interval(
-                    tanks_dict[t]["round"],
-                    shot_start,
-                    ShootAt,
-                    300,
-                    1,
-                    'shot{}-done'.format(t)
-                )
-                tanks_dict[t]["shot_end"] = Point3(shot_end)
-                tanks_dict[t]["shot_deflected"] = shot_deflected
-                tanks_dict[t]["shot_interval"] = i
-                i.start()
-                self.enemyShot_snd.play()
         return Task.cont
 
     def render_mountains(self):
@@ -2200,7 +2284,7 @@ class MyApp(ShowBase):
             step = render.getRelativeVector(self.camera, (0, move_step, 0))
             self.camera.setPos(render, self.camera.getPos(render) + step)
 
-    def moveTask(self, task):
+    def updateTankControllersTask(self, task):
         dt = min(ClockObject.getGlobalClock().getDt(), 0.05)
         if self.waiting_to_start:
             return Task.cont
@@ -2212,23 +2296,83 @@ class MyApp(ShowBase):
         if self.game_over:
             return Task.cont
 
-        is_down = base.mouseWatcherNode.is_button_down
-        turn_step = camera_dict["turn_ang_vel"] * dt
-        move_step = camera_dict["translate_vel"] * dt
+        player_command = self.tank_controllers["0"].command(
+            self, self.tank_avatars["0"], dt, task.time
+        )
+        self.apply_player_tank_command(player_command, dt)
 
-        if is_down(arrow_right):
-            self.camera.setHpr(self.camera, -turn_step, 0, 0)
-        if is_down(arrow_left):
-            self.camera.setHpr(self.camera, turn_step, 0, 0)
-        if is_down(arrow_back):
-            step = render.getRelativeVector(self.camera, (0, -move_step, 0))
-            next_pos = self.resolve_obstacle_position(self.camera.getPos(render) + step, PLAYER_COLLISION_RADIUS)
-            self.camera.setPos(render, next_pos)
-        if is_down(arrow_forward):
-            step = render.getRelativeVector(self.camera, (0, move_step, 0))
-            next_pos = self.resolve_obstacle_position(self.camera.getPos(render) + step, PLAYER_COLLISION_RADIUS)
-            self.camera.setPos(render, next_pos)
+        for t in tanks_list:
+            command = self.tank_controllers[t].command(
+                self, self.tank_avatars[t], dt, task.time
+            )
+            self.apply_autonomous_tank_command(t, command)
+            if command.fire:
+                self.fire_enemy_tank(t)
+
         return Task.cont
+
+    def apply_player_tank_command(self, command, dt):
+        if command.turn:
+            turn_step = camera_dict["turn_ang_vel"] * dt * command.turn
+            self.camera.setHpr(self.camera, turn_step, 0, 0)
+
+        if command.throttle:
+            move_step = camera_dict["translate_vel"] * dt * command.throttle
+            step = render.getRelativeVector(self.camera, (0, move_step, 0))
+            next_pos = self.resolve_obstacle_position(
+                self.camera.getPos(render) + step,
+                self.tank_avatars["0"].collision_radius
+            )
+            self.camera.setPos(render, next_pos)
+
+        if command.fire:
+            self.shoot()
+
+    def apply_autonomous_tank_command(self, t, command):
+        if command.desired_world_pos is None:
+            return
+
+        locator = tanks_dict[t]["Locator"]
+        avoided_world = self.resolve_obstacle_position(
+            command.desired_world_pos,
+            self.tank_avatars[t].collision_radius
+        )
+        local_pos = locator.getRelativePoint(render, avoided_world)
+        heading = command.desired_heading
+
+        previous_world = tanks_dict[t].get("last_pos", command.desired_world_pos)
+        move_dx = avoided_world[0] - previous_world[0]
+        move_dy = avoided_world[1] - previous_world[1]
+        if abs(move_dx) + abs(move_dy) > 0.001:
+            heading = math.degrees(math.atan2(move_dy, move_dx))
+
+        tanks_dict[t]["last_pos"] = Point3(avoided_world)
+        tanks_dict[t]["tank"].setPos(local_pos[0], local_pos[1], 0)
+        tanks_dict[t]["tank"].setH(heading)
+
+    def fire_enemy_tank(self, t):
+        print('Tank {} shooting'.format(t))
+        tanks_dict[t]["shooting"] = True
+        tanks_dict[t]["round"].wrtReparentTo(render)
+        shoot_at = render.getRelativeVector(tanks_dict[t]["tank"], (1, 0, 0))
+        shot_start = Point3(tanks_dict[t]["round"].getPos(render))
+        shot_end = shot_start + shoot_at * 300
+        tanks_dict[t]["shot_start"] = shot_start
+        tanks_dict[t]["shot_shooter_pos"] = Point3(tanks_dict[t]["tank"].getPos(render))
+        tanks_dict[t]["shot_shooter_hpr"] = tanks_dict[t]["tank"].getHpr(render)
+        i, shot_end, shot_deflected = self.create_shot_interval(
+            tanks_dict[t]["round"],
+            shot_start,
+            shoot_at,
+            300,
+            1,
+            'shot{}-done'.format(t)
+        )
+        tanks_dict[t]["shot_end"] = Point3(shot_end)
+        tanks_dict[t]["shot_deflected"] = shot_deflected
+        tanks_dict[t]["shot_interval"] = i
+        i.start()
+        self.enemyShot_snd.play()
 
     def reset_shot(self):
         # print('reset_shot')
@@ -2254,6 +2398,16 @@ class MyApp(ShowBase):
         tanks_dict[t]["round"].setPos(-0.4, 0, 1.61325)
         tanks_dict[t]["round"].setHpr(0, 0, 90)
         tanks_dict[t]["shooting"] = False
+
+    def request_player_fire(self):
+        if self.waiting_to_start:
+            self.start_game()
+            return
+
+        if self.game_over or self.investigation_mode:
+            return
+
+        self.human_tank_controller.request_fire()
 
     def shoot(self):
         if self.waiting_to_start:
@@ -2368,44 +2522,6 @@ class MyApp(ShowBase):
                                   base_color[2] * alpha,
                                   alpha)
             blip_np.show()
-
-        return Task.cont
-
-    def moveTanksTask(self, task):
-        if self.waiting_to_start:
-            return Task.cont
-
-        if self.investigation_mode:
-            return Task.cont
-
-        for t in tanks_list:
-            if tanks_dict[t]["move"]:
-                Ax = tanks_dict[t]["move_params"]["Ax"]
-                Ay = tanks_dict[t]["move_params"]["Ay"]
-                Bx = tanks_dict[t]["move_params"]["Bx"]
-                By = tanks_dict[t]["move_params"]["By"]
-                phix = tanks_dict[t]["move_params"]["phix"]
-                phiy = tanks_dict[t]["move_params"]["phiy"]
-                #
-                x = Ax * sin(Bx * task.time) + phix
-                y = Ay * sin(By * task.time) + phiy
-                dx = Ax * Bx * cos(Bx * task.time)
-                dy = Ay * By * cos(By * task.time)
-                heading = math.degrees(math.atan2(dy, dx))
-                locator = tanks_dict[t]["Locator"]
-                desired_world = render.getRelativePoint(locator, Point3(x, y, 0))
-                avoided_world = self.resolve_obstacle_position(desired_world, TANK_COLLISION_RADIUS)
-                local_pos = locator.getRelativePoint(render, avoided_world)
-
-                previous_world = tanks_dict[t].get("last_pos", desired_world)
-                move_dx = avoided_world[0] - previous_world[0]
-                move_dy = avoided_world[1] - previous_world[1]
-                if abs(move_dx) + abs(move_dy) > 0.001:
-                    heading = math.degrees(math.atan2(move_dy, move_dx))
-
-                tanks_dict[t]["last_pos"] = Point3(avoided_world)
-                tanks_dict[t]["tank"].setPos(local_pos[0], local_pos[1], 0)
-                tanks_dict[t]["tank"].setH(heading)
 
         return Task.cont
 
