@@ -31,7 +31,7 @@ arrow_left = KeyboardButton.left()
 arrow_back = KeyboardButton.down()
 arrow_forward = KeyboardButton.up()
 GG = LVecBase4(0, 1, 0, 1)  # game green constant
-camera_dict = {"turn_ang_vel": 0.25, "translate_vel": 0.5}
+camera_dict = {"turn_ang_vel": 0.36, "translate_vel": 0.5}
 NUMET = 2  # number of enemy tanks
 tanks_dict = {"0": {},
               "1": {"init_pos": Point3(30, 50, 0),
@@ -883,7 +883,7 @@ class MyApp(ShowBase):
         hit_marker_pos[2] = 0
         hit_marker = self.investigation_marker_root.attachNewNode("InvestigationPlayerAtHit")
         hit_marker.setPos(render, hit_marker_pos)
-        hit_marker.setHpr(render, event["player_hpr"][0], 0, 0)
+        hit_marker.setHpr(render, event["player_hpr"][0] + 90, 0, 0)
         self.tank.instanceTo(hit_marker)
         hit_marker.setColorScale(0.05, 0.35, 1.0, 1)
 
