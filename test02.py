@@ -813,6 +813,9 @@ class MyApp(ShowBase):
         self.accept('d', self.toggle_recon_drone)
         self.accept('i', self.toggle_investigation)
         self.accept('r', self.restart_game)
+        self.accept('0', self.set_human_control_tank, extraArgs=["0"])
+        for t in sorted(tanks_list):
+            self.accept(t, self.set_human_control_tank, extraArgs=[t])
         self.accept('window-event', self.handle_window_event)
 
         self.accept('into-' + 'cmTank', self.struck)
@@ -845,9 +848,11 @@ class MyApp(ShowBase):
             "0": TankAvatar("0", self.camera, collision_radius=PLAYER_COLLISION_RADIUS)
         }
         self.human_tank_controller = HumanTankController()
+        self.human_control_tank_id = "0"
         self.tank_controllers = {
             "0": self.human_tank_controller
         }
+        self.ai_tank_controllers = {}
 
         for t in tanks_list:
             self.tank_avatars[t] = TankAvatar(
@@ -856,7 +861,19 @@ class MyApp(ShowBase):
                 locator=tanks_dict[t]["Locator"],
                 collision_radius=TANK_COLLISION_RADIUS
             )
-            self.tank_controllers[t] = SineAiTankController(t)
+            self.ai_tank_controllers[t] = SineAiTankController(t)
+            self.tank_controllers[t] = self.ai_tank_controllers[t]
+
+    def set_human_control_tank(self, tank_id):
+        if tank_id != "0" and tank_id not in tanks_list:
+            return
+
+        self.human_control_tank_id = tank_id
+        self.tank_controllers["0"] = self.human_tank_controller if tank_id == "0" else TankController()
+        for t in tanks_list:
+            self.tank_controllers[t] = (
+                self.human_tank_controller if t == tank_id else self.ai_tank_controllers[t]
+            )
 
     def bloom_nodes(self):
         nodes = []
@@ -2296,20 +2313,28 @@ class MyApp(ShowBase):
         if self.game_over:
             return Task.cont
 
-        player_command = self.tank_controllers["0"].command(
-            self, self.tank_avatars["0"], dt, task.time
-        )
-        self.apply_player_tank_command(player_command, dt)
-
+        self.apply_controller_command("0", dt, task.time)
         for t in tanks_list:
-            command = self.tank_controllers[t].command(
-                self, self.tank_avatars[t], dt, task.time
-            )
-            self.apply_autonomous_tank_command(t, command)
-            if command.fire:
-                self.fire_enemy_tank(t)
+            self.apply_controller_command(t, dt, task.time)
 
         return Task.cont
+
+    def apply_controller_command(self, tank_id, dt, task_time):
+        command = self.tank_controllers[tank_id].command(
+            self, self.tank_avatars[tank_id], dt, task_time
+        )
+
+        if tank_id == "0":
+            self.apply_player_tank_command(command, dt)
+            return
+
+        if command.desired_world_pos is not None:
+            self.apply_autonomous_tank_command(tank_id, command)
+        else:
+            self.apply_direct_tank_command(tank_id, command, dt)
+
+        if command.fire and not tanks_dict[tank_id]["shooting"]:
+            self.fire_enemy_tank(tank_id)
 
     def apply_player_tank_command(self, command, dt):
         if command.turn:
@@ -2327,6 +2352,26 @@ class MyApp(ShowBase):
 
         if command.fire:
             self.shoot()
+
+    def apply_direct_tank_command(self, t, command, dt):
+        if not tanks_dict[t]["move"] or self.tank_avatars[t].is_hidden():
+            return
+
+        tank_np = tanks_dict[t]["tank"]
+        if command.turn:
+            turn_step = camera_dict["turn_ang_vel"] * dt * command.turn
+            tank_np.setH(tank_np, turn_step)
+
+        if command.throttle:
+            move_step = camera_dict["translate_vel"] * dt * command.throttle
+            step = render.getRelativeVector(tank_np, (move_step, 0, 0))
+            avoided_world = self.resolve_obstacle_position(
+                tank_np.getPos(render) + step,
+                self.tank_avatars[t].collision_radius
+            )
+            local_pos = tanks_dict[t]["Locator"].getRelativePoint(render, avoided_world)
+            tanks_dict[t]["last_pos"] = Point3(avoided_world)
+            tank_np.setPos(local_pos[0], local_pos[1], 0)
 
     def apply_autonomous_tank_command(self, t, command):
         if command.desired_world_pos is None:
@@ -2548,7 +2593,7 @@ class MyApp(ShowBase):
         rad = math.sqrt(vectP[0] ** 2 + vectP[1] ** 2)
         theta = math.atan2(vectP[1], vectP[0]) * 180. / math.pi
         self.textObject.text = str(int(vectH[0] + 180)) + ", " + str(int(rad)) + ", " + str(int(theta)) + ", " \
-                             + str(int(vectH[0] - theta))
+                             + str(int(vectH[0] - theta)) + "\nCTRL TANK " + self.human_control_tank_id
 
         # mat = Mat4(self.camera.getMat())
         # mat.invertInPlace()
