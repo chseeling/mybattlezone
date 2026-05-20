@@ -32,7 +32,9 @@ arrow_back = KeyboardButton.down()
 arrow_forward = KeyboardButton.up()
 shift_key = KeyboardButton.shift()
 GG = LVecBase4(0, 1, 0, 1)  # game green constant
-camera_dict = {"turn_ang_vel": 21.6, "translate_vel": 30.0}
+PLAYER_TURN_ANG_VEL = 43.2
+ENEMY_TURN_ANG_VEL = 21.6
+camera_dict = {"turn_ang_vel": PLAYER_TURN_ANG_VEL, "translate_vel": 30.0}
 NUMET = 2  # number of enemy tanks
 tanks_dict = {"0": {},
               "1": {"init_pos": Point3(30, 50, 0),
@@ -87,8 +89,13 @@ PLAYER_MAX_LIVES = 3
 PLAYER_HIT_COOLDOWN = 1.2
 PLAYER_FLASH_SECONDS = 0.45
 PLAYER_COLLISION_RADIUS = 1.5
+PLAYER_HIT_COLLISION_RADIUS = 0.65
+PLAYER_HIT_COLLISION_CENTER_Z = -1.15
+PLAYER_HIT_MAX_HEIGHT_ABOVE_GROUND = 1.35
+PROJECTILE_COLLISION_RADIUS = 0.18
 TANK_COLLISION_RADIUS = 1.6
 AUTONOMOUS_TANK_MAX_SPEED = 9.0
+AUTONOMOUS_TANK_TURNING_SPEED_FACTOR = 0.45
 PLAYER_CAMERA_HEIGHT = 2.0
 START_CAMERA_TERRAIN_CLEARANCE = 4.0
 TERRAIN_SLOPE_SAMPLE_DISTANCE = 3.0
@@ -101,6 +108,7 @@ TACTICAL_AI_MAX_RANGE = 145.0
 TACTICAL_AI_REPOSITION_SECONDS = 2.4
 TACTICAL_AI_FIRE_COOLDOWN = 3.6
 TACTICAL_AI_AIM_DWELL_SECONDS = 0.55
+TANK_RESPAWN_ATTACK_COOLDOWN = 5.0
 PLAYER_BARREL_TILT_MIN = -8.0
 PLAYER_BARREL_TILT_MAX = 12.0
 PLAYER_BARREL_TILT_RATE = 18.0
@@ -958,12 +966,12 @@ class MyApp(ShowBase):
         # print(tanks_dict['1']["tank"].getCollideMask())
 
         # collision sphere for round of main tank
-        cs = CollisionSphere(0, 0, 0, 1)
+        cs = CollisionSphere(0, 0, 0, PROJECTILE_COLLISION_RADIUS)
         tr_cnodePath = self.tank_round[0].attachNewNode(CollisionNode('cTankRound'))
         tr_cnodePath.node().addSolid(cs)
 
         # collision spheres for enemy tank rounds
-        cs = CollisionSphere(0, 0, 0, 1)
+        cs = CollisionSphere(0, 0, 0, PROJECTILE_COLLISION_RADIUS)
         for t in tanks_list:
             np = tanks_dict[t]["round"].attachNewNode(CollisionNode('ceTankRound' + t))
             np.node().addSolid(cs)
@@ -971,7 +979,7 @@ class MyApp(ShowBase):
             # np.show()
 
         # collision sphere main tank
-        cs = CollisionSphere(0, 0, 0, 1)
+        cs = CollisionSphere(0, 0, PLAYER_HIT_COLLISION_CENTER_Z, PLAYER_HIT_COLLISION_RADIUS)
         np = self.camera.attachNewNode(CollisionNode('cmTank'))
         np.node().addSolid(cs)
         # np.show()
@@ -1474,29 +1482,39 @@ class MyApp(ShowBase):
                 self.last_player_hit_event.get("fatal", False) or now <= self.investigation_available_until):
             self.enter_investigation()
 
+    def enemy_hit_is_low_enough_for_player_tank(self, hit_point):
+        hit_height = hit_point[2] - self.terrain_z(hit_point[0], hit_point[1])
+        return hit_height <= PLAYER_HIT_MAX_HEIGHT_ABOVE_GROUND
+
     def struck(self, entry):
         now = ClockObject.getGlobalClock().getFrameTime()
         if self.investigation_mode or self.game_over or now - self.last_player_hit_time < PLAYER_HIT_COOLDOWN:
             return
 
         from_name = entry.getFromNodePath().node().name
-        if from_name.startswith("ceTankRound"):
-            shooter_id = from_name[-1]
-            if tanks_dict[shooter_id].get("shot_deflected", False):
-                return
-            shot_start = tanks_dict[shooter_id].get("shot_start", tanks_dict[shooter_id]["round"].getPos(render))
-            try:
-                shot_end = entry.getSurfacePoint(render)
-            except Exception:
-                shot_end = tanks_dict[shooter_id]["round"].getPos(render)
-            self.arm_investigation(
-                shooter_id,
-                shot_start,
-                shot_end,
-                tanks_dict[shooter_id].get("shot_shooter_pos"),
-                tanks_dict[shooter_id].get("shot_shooter_hpr")
-            )
-            self.enemy_reset_shot(shooter_id)
+        if not from_name.startswith("ceTankRound"):
+            return
+
+        shooter_id = from_name[-1]
+        if tanks_dict[shooter_id].get("shot_deflected", False):
+            return
+        shot_start = tanks_dict[shooter_id].get("shot_start", tanks_dict[shooter_id]["round"].getPos(render))
+        try:
+            shot_end = entry.getSurfacePoint(render)
+        except Exception:
+            shot_end = tanks_dict[shooter_id]["round"].getPos(render)
+        shot_end = Point3(shot_end)
+        if not self.enemy_hit_is_low_enough_for_player_tank(shot_end):
+            return
+
+        self.arm_investigation(
+            shooter_id,
+            shot_start,
+            shot_end,
+            tanks_dict[shooter_id].get("shot_shooter_pos"),
+            tanks_dict[shooter_id].get("shot_shooter_hpr")
+        )
+        self.enemy_reset_shot(shooter_id)
 
         self.last_player_hit_time = now
         self.player_lives = max(0, self.player_lives - 1)
@@ -1743,6 +1761,7 @@ class MyApp(ShowBase):
             tanks_dict[t]["tank"].show()
             tanks_dict[t]["frags"].hide()
             tanks_dict[t].pop("last_pos", None)
+            tanks_dict[t]["attack_ready_time"] = 0
             self.enemy_reset_shot(t)
         self.update_lives_hud()
 
@@ -2808,6 +2827,20 @@ class MyApp(ShowBase):
             tanks_dict[t]["move"] = True
             tanks_dict[t].pop("last_pos", None)
             tanks_dict[t]["tank"].show()
+            self.set_tank_attack_cooldown(t, TANK_RESPAWN_ATTACK_COOLDOWN)
+
+    def set_tank_attack_cooldown(self, t, seconds):
+        ready_time = ClockObject.getGlobalClock().getFrameTime() + seconds
+        tanks_dict[t]["attack_ready_time"] = ready_time
+        controller = getattr(self, "ai_tank_controllers", {}).get(t)
+        if controller is not None:
+            if hasattr(controller, "next_fire_time"):
+                controller.next_fire_time = max(controller.next_fire_time, ready_time)
+            if hasattr(controller, "aim_acquired_since"):
+                controller.aim_acquired_since = None
+
+    def tank_attack_ready(self, t, task_time):
+        return task_time >= tanks_dict[t].get("attack_ready_time", 0)
 
     def renderTanks(self, tanks_group):
         # tank as lines
@@ -2825,6 +2858,7 @@ class MyApp(ShowBase):
         for t in tanks_list:
             tanks_dict[t]["Locator"] = tanks_group.attachNewNode("Tank{}-Locator".format(t))
             tanks_dict[t]["tank"] = tanks_dict[t]["Locator"].attachNewNode("Tank{}-Placeholder".format(t))
+            tanks_dict[t]["attack_ready_time"] = 0
             tanks_dict[t]["Locator"].setPos(tanks_dict[t]["init_pos"])
             tanks_dict[t]["tank"].setColorScale(tanks_dict[t]["color_scale"])
             self.tank.instanceTo(tanks_dict[t]["tank"])
@@ -2980,6 +3014,44 @@ class MyApp(ShowBase):
                     }
         return closest_hit
 
+    def segment_sphere_hit(self, start, end, center, radius):
+        direction = end - start
+        segment_len_sq = self.dot3(direction, direction)
+        if segment_len_sq < 0.0001:
+            return None
+
+        to_center = center - start
+        t = max(0, min(1, self.dot3(to_center, direction) / segment_len_sq))
+        closest = start + direction * t
+        miss = closest - center
+        if self.dot3(miss, miss) > radius * radius:
+            return None
+        return t, Point3(closest)
+
+    def find_player_shot_tank_hit(self, start, end, minimum_t=0.0):
+        closest_hit = None
+        for t in tanks_list:
+            tank_np = tanks_dict[t]["tank"]
+            if tank_np.isHidden():
+                continue
+
+            center = render.getRelativePoint(tank_np, Point3(0, 0, 0.9))
+            radius = tanks_dict[t]["coll_rad"] + 1.0
+            hit = self.segment_sphere_hit(start, end, center, radius)
+            if not hit:
+                continue
+
+            hit_t, hit_point = hit
+            if hit_t < minimum_t:
+                continue
+            if closest_hit is None or hit_t < closest_hit["t"]:
+                closest_hit = {
+                    "t": hit_t,
+                    "point": hit_point,
+                    "tank_id": t
+                }
+        return closest_hit
+
     def find_shot_ground_hit(self, start, end):
         start = Point3(start)
         end = Point3(end)
@@ -3050,6 +3122,19 @@ class MyApp(ShowBase):
             Func(burst_np.removeNode)
         ).start()
 
+    def register_player_tank_hit(self, tank_id):
+        if tank_id not in tanks_list:
+            return
+        if tanks_dict[tank_id]["tank"].isHidden():
+            return
+
+        print('hit tank ' + tank_id)
+        tanks_dict[tank_id]["move"] = False
+        tanks_dict[tank_id]["tank"].hide()
+        tanks_dict[tank_id]["frags"].showThrough()
+        tanks_dict[tank_id]["explosion"].start()
+        self.enemyTankExplosion_snd.play()
+
     def has_tank_line_of_sight(self, tank_pos, target_pos):
         start = Point3(tank_pos[0], tank_pos[1], tank_pos[2] + 1.5)
         end = Point3(target_pos[0], target_pos[1], target_pos[2])
@@ -3091,6 +3176,24 @@ class MyApp(ShowBase):
         raw_end = Point3(start + shot_dir * distance)
         hit = self.find_shot_obstacle_hit(collision_start, collision_end)
         ground_hit = self.find_shot_ground_hit(collision_start, collision_end)
+        tank_hit = self.find_player_shot_tank_hit(
+            collision_start,
+            collision_end,
+            max(0, visible_offset / max(collision_distance, 0.001))
+        ) if done_event == 'shot-done' else None
+
+        if tank_hit and (not hit or tank_hit["t"] < hit["t"]) and (not ground_hit or tank_hit["t"] < ground_hit["t"]):
+            hit_distance = collision_distance * tank_hit["t"]
+            visible_distance_to_impact = max(0, hit_distance - visible_offset)
+            impact = tank_hit["point"]
+            first_duration = max(0.03, duration * min(1, visible_distance_to_impact / distance))
+            interval = Sequence(
+                LerpPosInterval(round_np, first_duration, pos=impact),
+                Func(self.register_player_tank_hit, tank_hit["tank_id"])
+            )
+            interval.setDoneEvent(done_event)
+            return interval, impact, False
+
         if ground_hit and (not hit or ground_hit["t"] < hit["t"]):
             hit_distance = collision_distance * ground_hit["t"]
             visible_distance_to_impact = max(0, hit_distance - visible_offset)
@@ -3204,7 +3307,11 @@ class MyApp(ShowBase):
         else:
             self.apply_direct_tank_command(tank_id, command, dt)
 
-        if command.fire and not self.enemy_shooting_suspended and not tanks_dict[tank_id]["shooting"]:
+        if (
+                command.fire and
+                self.tank_attack_ready(tank_id, task_time) and
+                not self.enemy_shooting_suspended and
+                not tanks_dict[tank_id]["shooting"]):
             self.fire_enemy_tank(tank_id)
 
     def apply_player_tank_command(self, command, dt):
@@ -3282,15 +3389,31 @@ class MyApp(ShowBase):
         to_target = target_world - current_world
         distance = math.sqrt(to_target[0] ** 2 + to_target[1] ** 2)
         max_step = AUTONOMOUS_TANK_MAX_SPEED * dt
+        current_heading = tank_np.getH(render)
+        target_heading = command.desired_heading
+        if target_heading is None:
+            target_heading = current_heading
 
-        if distance > max_step and distance > 0.001:
-            candidate_world = Point3(
-                current_world[0] + to_target[0] / distance * max_step,
-                current_world[1] + to_target[1] / distance * max_step,
-                current_world[2]
-            )
-        else:
-            candidate_world = Point3(target_world)
+        if distance > 0.001:
+            target_heading = math.degrees(math.atan2(to_target[1], to_target[0]))
+
+        heading = self.approach_angle(
+            current_heading,
+            target_heading,
+            ENEMY_TURN_ANG_VEL * dt
+        )
+        heading_error = abs(signed_angular_delta_degrees(target_heading, heading))
+        alignment = max(
+            AUTONOMOUS_TANK_TURNING_SPEED_FACTOR,
+            math.cos(math.radians(heading_error))
+        )
+        move_step = min(max_step * alignment, distance) if distance > 0.001 else 0
+        heading_radians = math.radians(heading)
+        candidate_world = Point3(
+            current_world[0] + math.cos(heading_radians) * move_step,
+            current_world[1] + math.sin(heading_radians) * move_step,
+            current_world[2]
+        )
 
         avoided_world = self.resolve_obstacle_position(
             candidate_world,
@@ -3298,14 +3421,6 @@ class MyApp(ShowBase):
         )
         surface_world = self.terrain_position(avoided_world)
         local_pos = locator.getRelativePoint(render, surface_world)
-        heading = command.desired_heading
-
-        previous_world = tanks_dict[t].get("last_pos", current_world)
-        move_dx = surface_world[0] - previous_world[0]
-        move_dy = surface_world[1] - previous_world[1]
-        if abs(move_dx) + abs(move_dy) > 0.001:
-            heading = math.degrees(math.atan2(move_dy, move_dx))
-
         tanks_dict[t]["last_pos"] = Point3(surface_world)
         tanks_dict[t]["tank"].setPos(local_pos)
         tanks_dict[t]["tank"].setHpr(render, *self.terrain_surface_hpr(surface_world[0], surface_world[1], heading, "x"))
@@ -3314,6 +3429,7 @@ class MyApp(ShowBase):
         print('Tank {} shooting'.format(t))
         tanks_dict[t]["shooting"] = True
         tanks_dict[t]["round"].wrtReparentTo(render)
+        tanks_dict[t]["round"].show()
         shoot_at = render.getRelativeVector(tanks_dict[t]["tank"], (1, 0, 0))
         shot_start = Point3(tanks_dict[t]["round"].getPos(render))
         shot_end = shot_start + shoot_at * 300
@@ -3357,6 +3473,7 @@ class MyApp(ShowBase):
         tanks_dict[t]["round"].reparentTo(tanks_dict[t]["tank"])
         tanks_dict[t]["round"].setPos(-0.4, 0, 1.61325)
         tanks_dict[t]["round"].setHpr(0, 0, 90)
+        tanks_dict[t]["round"].show()
         tanks_dict[t]["shooting"] = False
 
     def request_player_fire(self):
@@ -3422,12 +3539,7 @@ class MyApp(ShowBase):
             if self.player_shot_deflected:
                 return
             t = entry.getIntoNodePath().node().name[5:6]
-            print('hit tank ' + t)
-            tanks_dict[t]["move"] = False
-            tanks_dict[t]["tank"].hide()
-            tanks_dict[t]["frags"].showThrough()
-            tanks_dict[t]["explosion"].start()
-            self.enemyTankExplosion_snd.play()
+            self.register_player_tank_hit(t)
         else:
             print("hit something, but not a tank")
 
