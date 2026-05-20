@@ -1529,20 +1529,25 @@ class MyApp(ShowBase):
     def render_tank_hud_labels(self):
         self.tank_hud_label_lines = {}
         self.tank_hud_label_text = {}
+        self.tank_hud_label_cards = {}
         for t in sorted(tanks_list):
+            card_np = render2d.attachNewNode("Tank{}HudLabelCard".format(t))
             line_np = render2d.attachNewNode("Tank{}HudLabelLine".format(t))
+            self.tank_hud_label_cards[t] = card_np
             self.tank_hud_label_lines[t] = line_np
             color = tanks_dict[t]["color_scale"]
             label = OnscreenText(text=t, pos=(0, 0), align=TextNode.ACenter,
-                                 scale=(0.04, 0.06),
+                                 scale=(0.038, 0.057),
                                  fg=(color[0], color[1], color[2], 1), mayChange=True)
             label.reparentTo(render2d)
             label.hide()
+            card_np.hide()
             line_np.hide()
             self.tank_hud_label_text[t] = label
 
     def hide_tank_hud_label(self, t):
         self.tank_hud_label_text[t].hide()
+        self.tank_hud_label_cards[t].hide()
         self.tank_hud_label_lines[t].hide()
 
     def updateTankHudLabelsTask(self, task):
@@ -1573,25 +1578,35 @@ class MyApp(ShowBase):
             side = -1 if target_x > 0.72 else 1
             label_x = max(-0.94, min(0.94, target_x + side * 0.08))
             label_z = max(-0.82, min(0.62, target_z + 0.09))
-            frame_w = 0.075
-            frame_h = 0.09
+            frame_w = 0.082
+            frame_h = 0.082
             anchor_x = label_x - side * frame_w * 0.5
             anchor_z = label_z - frame_h * 0.22
 
             label = self.tank_hud_label_text[t]
-            label.setPos(label_x, label_z)
+            label.setPos(label_x, label_z - 0.004)
             label.show()
 
-            line_root = self.tank_hud_label_lines[t]
-            line_root.node().removeAllChildren()
             color = tanks_dict[t]["color_scale"]
-            lines = LineSegs("Tank{}HudLabelBubble".format(t))
-            lines.setThickness(1.6)
-            lines.setColor(color[0], color[1], color[2], 1)
             x0 = label_x - frame_w * 0.5
             x1 = label_x + frame_w * 0.5
             z0 = label_z - frame_h * 0.5
             z1 = label_z + frame_h * 0.5
+
+            card_root = self.tank_hud_label_cards[t]
+            card_root.node().removeAllChildren()
+            card = CardMaker("Tank{}HudLabelBackdrop".format(t))
+            card.setFrame(x0, x1, z0, z1)
+            card_np = card_root.attachNewNode(card.generate())
+            card_np.setTransparency(TransparencyAttrib.MAlpha)
+            card_np.setColorScale(0, 0, 0, 0.38)
+            card_root.show()
+
+            line_root = self.tank_hud_label_lines[t]
+            line_root.node().removeAllChildren()
+            lines = LineSegs("Tank{}HudLabelBubble".format(t))
+            lines.setThickness(1.6)
+            lines.setColor(color[0], color[1], color[2], 1)
             lines.moveTo(x0, 0, z0)
             lines.drawTo(x1, 0, z0)
             lines.drawTo(x1, 0, z1)
