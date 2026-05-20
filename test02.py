@@ -570,6 +570,41 @@ class HumanTankController(TankController):
         return TankCommand(throttle=throttle, turn=turn, fire=fire)
 
 
+class RemoteTankController(TankController):
+    def __init__(self, timeout_seconds=0.35):
+        self.timeout_seconds = timeout_seconds
+        self.current_command = TankCommand()
+        self.last_update_time = None
+
+    def submit_command(self, command, timestamp=None):
+        if timestamp is None:
+            timestamp = ClockObject.getGlobalClock().getFrameTime()
+        self.current_command = command
+        self.last_update_time = timestamp
+
+    def submit_input(self, throttle=0.0, turn=0.0, fire=False):
+        self.submit_command(TankCommand(throttle=throttle, turn=turn, fire=fire))
+
+    def command(self, app, avatar, dt, task_time):
+        if self.last_update_time is None:
+            return TankCommand()
+
+        now = ClockObject.getGlobalClock().getFrameTime()
+        if now - self.last_update_time > self.timeout_seconds:
+            self.current_command = TankCommand()
+            return self.current_command
+
+        command = self.current_command
+        self.current_command = TankCommand(
+            throttle=command.throttle,
+            turn=command.turn,
+            fire=False,
+            desired_world_pos=command.desired_world_pos,
+            desired_heading=command.desired_heading
+        )
+        return command
+
+
 class SineAiTankController(TankController):
     def __init__(self, tank_id):
         self.tank_id = tank_id
@@ -855,6 +890,7 @@ class MyApp(ShowBase):
             "0": self.human_tank_controller
         }
         self.ai_tank_controllers = {}
+        self.remote_tank_controllers = {}
 
         for t in tanks_list:
             self.tank_avatars[t] = TankAvatar(
@@ -864,6 +900,7 @@ class MyApp(ShowBase):
                 collision_radius=TANK_COLLISION_RADIUS
             )
             self.ai_tank_controllers[t] = SineAiTankController(t)
+            self.remote_tank_controllers[t] = RemoteTankController()
             self.tank_controllers[t] = self.ai_tank_controllers[t]
 
     def set_human_control_tank(self, tank_id):
@@ -876,6 +913,32 @@ class MyApp(ShowBase):
             self.tank_controllers[t] = (
                 self.human_tank_controller if t == tank_id else self.ai_tank_controllers[t]
             )
+
+    def set_remote_control_tank(self, tank_id):
+        if tank_id not in tanks_list:
+            return
+
+        if self.human_control_tank_id == tank_id:
+            self.set_human_control_tank("0")
+        self.tank_controllers[tank_id] = self.remote_tank_controllers[tank_id]
+
+    def clear_remote_control_tank(self, tank_id):
+        if tank_id not in tanks_list:
+            return
+
+        if self.human_control_tank_id == tank_id:
+            return
+        self.tank_controllers[tank_id] = self.ai_tank_controllers[tank_id]
+
+    def submit_remote_tank_input(self, tank_id, throttle=0.0, turn=0.0, fire=False):
+        if tank_id not in tanks_list:
+            return
+
+        self.remote_tank_controllers[tank_id].submit_input(
+            throttle=throttle,
+            turn=turn,
+            fire=fire
+        )
 
     def bloom_nodes(self):
         nodes = []
