@@ -101,6 +101,7 @@ START_CAMERA_TERRAIN_CLEARANCE = 4.0
 TERRAIN_SLOPE_SAMPLE_DISTANCE = 3.0
 TERRAIN_SLOPE_RESPONSE = 0.75
 ENEMY_CONTROLLER_MODE = "TACTICAL"
+TACTICAL_AI_DEBUG_LABELS = True
 TACTICAL_AI_AIM_TOLERANCE_DEGREES = 3.0
 TACTICAL_AI_IDEAL_RANGE = 72.0
 TACTICAL_AI_MIN_RANGE = 34.0
@@ -767,16 +768,19 @@ class TacticalAiTankController(TankController):
         self.min_range = TACTICAL_AI_MIN_RANGE + (int(tank_id) - 2) * 3.0
         self.max_range = TACTICAL_AI_MAX_RANGE + (int(tank_id) - 2) * 9.0
         self.base_strafe_weight = 0.62 + int(tank_id) * 0.08
+        self.debug_state = "INIT"
 
     def command(self, app, avatar, dt, task_time):
         tank_state = tanks_dict[self.tank_id]
         if not tank_state["move"] or avatar.is_hidden():
             self.aim_acquired_since = None
+            self.debug_state = "DOWN"
             return TankCommand()
 
         observation = app.build_tank_observation(self.tank_id)
         if observation["distance_to_player"] < 0.001:
             self.aim_acquired_since = None
+            self.debug_state = "HOLD"
             return TankCommand()
 
         if task_time > self.reposition_until and (
@@ -821,6 +825,7 @@ class TacticalAiTankController(TankController):
             task_time >= self.next_fire_time
         )
         if can_fire:
+            self.debug_state = "RFIRE" if observation["risky_line_of_sight"] and not observation["line_of_sight"] else "FIRE"
             self.next_fire_time = task_time + TACTICAL_AI_FIRE_COOLDOWN
             self.reposition_until = max(
                 self.reposition_until,
@@ -839,6 +844,14 @@ class TacticalAiTankController(TankController):
             )
 
         if firing_lane and range_is_good and task_time >= self.reposition_until:
+            self.debug_state = self.tactical_debug_state(
+                observation,
+                firing_lane,
+                aligned,
+                range_is_good,
+                aim_dwell_complete,
+                task_time
+            )
             return TankCommand(
                 desired_world_pos=Point3(observation["tank_pos"]),
                 desired_heading=aim_heading,
@@ -846,11 +859,38 @@ class TacticalAiTankController(TankController):
             )
 
         desired_world = self.choose_reposition_target(observation, task_time)
+        self.debug_state = self.tactical_debug_state(
+            observation,
+            firing_lane,
+            aligned,
+            range_is_good,
+            aim_dwell_complete,
+            task_time
+        )
         return TankCommand(
             desired_world_pos=desired_world,
             desired_heading=aim_heading,
             fire=False
         )
+
+    def tactical_debug_state(self, observation, firing_lane, aligned, range_is_good, aim_dwell_complete, task_time):
+        if task_time < self.next_fire_time:
+            return "COOL"
+        if observation["is_shooting"]:
+            return "SHOT"
+        if not range_is_good:
+            return "RANGE"
+        if not firing_lane:
+            return "HOLD"
+        if observation["risky_line_of_sight"] and not observation["line_of_sight"]:
+            return "RISK"
+        if not aligned:
+            return "AIM"
+        if not aim_dwell_complete:
+            return "LOCK"
+        if task_time < self.reposition_until:
+            return "MOVE"
+        return "HOLD"
 
     def choose_reposition_target(self, observation, task_time):
         tank_pos = observation["tank_pos"]
@@ -2236,6 +2276,14 @@ class MyApp(ShowBase):
         self.tank_hud_label_cards[t].hide()
         self.tank_hud_label_lines[t].hide()
 
+    def tank_hud_label_text_value(self, t):
+        if not TACTICAL_AI_DEBUG_LABELS:
+            return t
+        controller = getattr(self, "ai_tank_controllers", {}).get(t)
+        if controller is None:
+            return t
+        return "{}:{}".format(t, getattr(controller, "debug_state", ""))
+
     def updateTankHudLabelsTask(self, task):
         if self.waiting_to_start:
             for t in tanks_list:
@@ -2264,12 +2312,18 @@ class MyApp(ShowBase):
             side = -1 if target_x > 0.72 else 1
             label_x = max(-0.94, min(0.94, target_x + side * 0.08))
             label_z = max(-0.82, min(0.62, target_z + 0.09))
-            frame_w = 0.082
+            debug_enabled = TACTICAL_AI_DEBUG_LABELS
+            frame_w = 0.13 if debug_enabled else 0.082
             frame_h = 0.082
             anchor_x = label_x - side * frame_w * 0.5
             anchor_z = label_z - frame_h * 0.22
 
             label = self.tank_hud_label_text[t]
+            label.text = self.tank_hud_label_text_value(t)
+            if debug_enabled:
+                label.setScale(0.026, 0.044)
+            else:
+                label.setScale(0.038, 0.057)
             label.setPos(label_x, label_z - 0.004)
             label.show()
 
