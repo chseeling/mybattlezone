@@ -107,6 +107,7 @@ PLAYER_BARREL_AIM_REFERENCE_DISTANCE = 500.0
 PLAYER_SHOT_START_Y = 20.0
 PLAYER_SHOT_START_Z = -0.2
 PLAYER_SHOT_BACKTRACE_DISTANCE = 20.0
+PLAYER_SIGHT_MOVES_WITH_BARREL = True
 INVESTIGATE_WINDOW_SECONDS = 4.0
 INVESTIGATE_FATAL_WINDOW_SECONDS = 999999.0
 INVESTIGATION_GHOST_SPEED = 51.0
@@ -1539,6 +1540,7 @@ class MyApp(ShowBase):
                 self.sight_clear_np.hide()
                 self.sight_engaged_np.hide()
                 self.barrelAimMarkerNp.hide()
+                self.levelShotMarkerNp.hide()
             else:
                 self.sight_clear_np.show()
                 self.update_barrel_aim_marker()
@@ -1938,8 +1940,9 @@ class MyApp(ShowBase):
         self.sight_engaged_np = NodePath(self.sight_engaged_node)
         self.sight_engaged_np.setColorScale(GG)
 
-        self.sight_clear_np.reparentTo(render2d)
-        self.sight_engaged_np.reparentTo(render2d)
+        self.sightRootNp = render2d.attachNewNode("player-sight-root")
+        self.sight_clear_np.reparentTo(self.sightRootNp)
+        self.sight_engaged_np.reparentTo(self.sightRootNp)
         self.sight_engaged_np.hide()
 
         aim_marker = LineSegs("barrel-tilt-aim-marker")
@@ -1951,6 +1954,18 @@ class MyApp(ShowBase):
         self.barrelAimMarkerNp = NodePath(aim_marker.create())
         self.barrelAimMarkerNp.setColorScale(0.0, 0.85, 0.18, 1.0)
         self.barrelAimMarkerNp.reparentTo(render2d)
+
+        level_marker = LineSegs("level-shot-reference-marker")
+        level_marker.setThickness(2)
+        level_marker.moveTo(-0.16, 0, 0)
+        level_marker.drawTo(-0.045, 0, 0)
+        level_marker.moveTo(0.045, 0, 0)
+        level_marker.drawTo(0.16, 0, 0)
+        level_marker.moveTo(0, 0, -0.025)
+        level_marker.drawTo(0, 0, 0.025)
+        self.levelShotMarkerNp = NodePath(level_marker.create())
+        self.levelShotMarkerNp.setColorScale(0.0, 0.38, 0.08, 1.0)
+        self.levelShotMarkerNp.reparentTo(render2d)
         self.update_barrel_aim_marker()
 
     def update_barrel_aim_marker(self):
@@ -1958,17 +1973,30 @@ class MyApp(ShowBase):
             return
 
         if getattr(self, "waiting_to_start", False):
+            self.sightRootNp.setZ(0)
             self.barrelAimMarkerNp.hide()
+            self.levelShotMarkerNp.hide()
             return
 
         aim_point = self.player_barrel_aim_point_local()
         projected = Point2()
         if aim_point[1] <= 0 or not self.camLens.project(aim_point, projected):
+            self.sightRootNp.hide()
             self.barrelAimMarkerNp.hide()
+            self.levelShotMarkerNp.hide()
             return
 
-        self.barrelAimMarkerNp.setPos(projected[0], 0, projected[1])
-        self.barrelAimMarkerNp.show()
+        self.sightRootNp.show()
+        if PLAYER_SIGHT_MOVES_WITH_BARREL:
+            self.sightRootNp.setPos(projected[0], 0, projected[1])
+            self.barrelAimMarkerNp.hide()
+            self.levelShotMarkerNp.setPos(0, 0, 0)
+            self.levelShotMarkerNp.show()
+        else:
+            self.sightRootNp.setPos(0, 0, 0)
+            self.barrelAimMarkerNp.setPos(projected[0], 0, projected[1])
+            self.barrelAimMarkerNp.show()
+            self.levelShotMarkerNp.hide()
 
     def render_radar(self):
         self.radar_np = aspect2d.attachNewNode("Radar")
