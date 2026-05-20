@@ -92,6 +92,13 @@ PLAYER_CAMERA_HEIGHT = 2.0
 START_CAMERA_TERRAIN_CLEARANCE = 4.0
 TERRAIN_SLOPE_SAMPLE_DISTANCE = 3.0
 TERRAIN_SLOPE_RESPONSE = 0.75
+ENEMY_CONTROLLER_MODE = "TACTICAL"
+TACTICAL_AI_AIM_TOLERANCE_DEGREES = 3.0
+TACTICAL_AI_IDEAL_RANGE = 72.0
+TACTICAL_AI_MIN_RANGE = 34.0
+TACTICAL_AI_MAX_RANGE = 145.0
+TACTICAL_AI_REPOSITION_SECONDS = 2.4
+TACTICAL_AI_FIRE_COOLDOWN = 1.8
 INVESTIGATE_WINDOW_SECONDS = 4.0
 INVESTIGATE_FATAL_WINDOW_SECONDS = 999999.0
 INVESTIGATION_GHOST_SPEED = 51.0
@@ -532,6 +539,10 @@ def angular_distance_degrees(a, b):
     return abs((a - b + 180) % 360 - 180)
 
 
+def signed_angular_delta_degrees(target, current):
+    return (target - current + 180) % 360 - 180
+
+
 def create_radar_sweep_slice(radius, arc_degrees, max_alpha, segments=18):
     vertex_format = GeomVertexFormat.getV3c4()
     vertex_data = GeomVertexData("radar-sweep-slice", vertex_format, Geom.UHStatic)
@@ -706,6 +717,97 @@ class SineAiTankController(TankController):
         )
         shoot_at = LVecBase2d(shoot_at[0], shoot_at[1]).normalized()
         return shoot_at[0] > 0.99995
+
+
+class TacticalAiTankController(TankController):
+    def __init__(self, tank_id):
+        self.tank_id = tank_id
+        self.reposition_until = 0
+        self.strafe_sign = 1 if int(tank_id) % 2 else -1
+        self.next_fire_time = 0
+
+    def command(self, app, avatar, dt, task_time):
+        tank_state = tanks_dict[self.tank_id]
+        if not tank_state["move"] or avatar.is_hidden():
+            return TankCommand()
+
+        observation = app.build_tank_observation(self.tank_id)
+        if observation["distance_to_player"] < 0.001:
+            return TankCommand()
+
+        if task_time > self.reposition_until and (
+            not observation["line_of_sight"] or
+            observation["distance_to_player"] < TACTICAL_AI_MIN_RANGE or
+            observation["distance_to_player"] > TACTICAL_AI_MAX_RANGE
+        ):
+            self.reposition_until = task_time + TACTICAL_AI_REPOSITION_SECONDS
+            self.strafe_sign *= -1
+
+        aim_heading = observation["heading_to_player"]
+        aligned = abs(observation["aim_error"]) <= TACTICAL_AI_AIM_TOLERANCE_DEGREES
+        can_fire = (
+            observation["line_of_sight"] and
+            aligned and
+            not observation["is_shooting"] and
+            task_time >= self.next_fire_time
+        )
+        if can_fire:
+            self.next_fire_time = task_time + TACTICAL_AI_FIRE_COOLDOWN
+            return TankCommand(
+                desired_world_pos=Point3(observation["tank_pos"]),
+                desired_heading=aim_heading,
+                fire=True
+            )
+
+        range_is_good = (
+            TACTICAL_AI_MIN_RANGE <= observation["distance_to_player"] <= TACTICAL_AI_MAX_RANGE
+        )
+        if observation["line_of_sight"] and range_is_good and task_time >= self.reposition_until:
+            return TankCommand(
+                desired_world_pos=Point3(observation["tank_pos"]),
+                desired_heading=aim_heading,
+                fire=False
+            )
+
+        desired_world = self.choose_reposition_target(observation, task_time)
+        return TankCommand(
+            desired_world_pos=desired_world,
+            desired_heading=aim_heading,
+            fire=False
+        )
+
+    def choose_reposition_target(self, observation, task_time):
+        tank_pos = observation["tank_pos"]
+        player_dx = observation["player_dx"]
+        player_dy = observation["player_dy"]
+        distance = max(0.001, observation["distance_to_player"])
+        to_player_x = player_dx / distance
+        to_player_y = player_dy / distance
+        strafe_x = -to_player_y * self.strafe_sign
+        strafe_y = to_player_x * self.strafe_sign
+
+        range_error = distance - TACTICAL_AI_IDEAL_RANGE
+        forward_weight = max(-0.9, min(0.9, range_error / TACTICAL_AI_IDEAL_RANGE))
+        strafe_weight = 0.75 if task_time < self.reposition_until else 0.35
+        if observation["line_of_sight"]:
+            strafe_weight *= 0.55
+        else:
+            forward_weight *= 0.35
+
+        move_x = to_player_x * forward_weight + strafe_x * strafe_weight
+        move_y = to_player_y * forward_weight + strafe_y * strafe_weight
+        move_len = math.sqrt(move_x ** 2 + move_y ** 2)
+        if move_len < 0.001:
+            move_x = strafe_x
+            move_y = strafe_y
+            move_len = 1
+
+        step = 18.0
+        return Point3(
+            tank_pos[0] + move_x / move_len * step,
+            tank_pos[1] + move_y / move_len * step,
+            tank_pos[2]
+        )
 
 
 class MyApp(ShowBase):
@@ -956,7 +1058,10 @@ class MyApp(ShowBase):
                 locator=tanks_dict[t]["Locator"],
                 collision_radius=TANK_COLLISION_RADIUS
             )
-            self.ai_tank_controllers[t] = SineAiTankController(t)
+            if ENEMY_CONTROLLER_MODE == "TACTICAL":
+                self.ai_tank_controllers[t] = TacticalAiTankController(t)
+            else:
+                self.ai_tank_controllers[t] = SineAiTankController(t)
             self.remote_tank_controllers[t] = RemoteTankController()
             self.tank_controllers[t] = self.ai_tank_controllers[t]
 
@@ -2772,6 +2877,36 @@ class MyApp(ShowBase):
                         "obstacle": obstacle["name"]
                     }
         return closest_hit
+
+    def has_tank_line_of_sight(self, tank_pos, target_pos):
+        start = Point3(tank_pos[0], tank_pos[1], tank_pos[2] + 1.5)
+        end = Point3(target_pos[0], target_pos[1], target_pos[2])
+        return self.find_shot_obstacle_hit(start, end) is None
+
+    def build_tank_observation(self, tank_id):
+        tank_np = tanks_dict[tank_id]["tank"]
+        tank_pos = Point3(tank_np.getPos(render))
+        player_pos = Point3(self.camera.getPos(render))
+        player_dx = player_pos[0] - tank_pos[0]
+        player_dy = player_pos[1] - tank_pos[1]
+        distance = math.sqrt(player_dx ** 2 + player_dy ** 2)
+        heading_to_player = math.degrees(math.atan2(player_dy, player_dx))
+        tank_heading = tank_np.getH(render)
+        aim_error = signed_angular_delta_degrees(heading_to_player, tank_heading)
+
+        return {
+            "tank_id": tank_id,
+            "tank_pos": tank_pos,
+            "tank_heading": tank_heading,
+            "player_pos": player_pos,
+            "player_dx": player_dx,
+            "player_dy": player_dy,
+            "distance_to_player": distance,
+            "heading_to_player": heading_to_player,
+            "aim_error": aim_error,
+            "line_of_sight": self.has_tank_line_of_sight(tank_pos, player_pos),
+            "is_shooting": tanks_dict[tank_id]["shooting"],
+        }
 
     def create_shot_interval(self, round_np, start, direction, distance, duration, done_event, collision_start=None):
         shot_dir = self.normalize3(direction)
