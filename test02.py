@@ -100,6 +100,7 @@ TACTICAL_AI_MIN_RANGE = 34.0
 TACTICAL_AI_MAX_RANGE = 145.0
 TACTICAL_AI_REPOSITION_SECONDS = 2.4
 TACTICAL_AI_FIRE_COOLDOWN = 3.6
+TACTICAL_AI_AIM_DWELL_SECONDS = 0.55
 PLAYER_BARREL_TILT_MIN = -8.0
 PLAYER_BARREL_TILT_MAX = 12.0
 PLAYER_BARREL_TILT_RATE = 18.0
@@ -746,14 +747,17 @@ class TacticalAiTankController(TankController):
         self.reposition_until = 0
         self.strafe_sign = 1 if int(tank_id) % 2 else -1
         self.next_fire_time = 0
+        self.aim_acquired_since = None
 
     def command(self, app, avatar, dt, task_time):
         tank_state = tanks_dict[self.tank_id]
         if not tank_state["move"] or avatar.is_hidden():
+            self.aim_acquired_since = None
             return TankCommand()
 
         observation = app.build_tank_observation(self.tank_id)
         if observation["distance_to_player"] < 0.001:
+            self.aim_acquired_since = None
             return TankCommand()
 
         if task_time > self.reposition_until and (
@@ -766,9 +770,25 @@ class TacticalAiTankController(TankController):
 
         aim_heading = observation["heading_to_player"]
         aligned = abs(observation["aim_error"]) <= TACTICAL_AI_AIM_TOLERANCE_DEGREES
+        range_is_good = (
+            TACTICAL_AI_MIN_RANGE <= observation["distance_to_player"] <= TACTICAL_AI_MAX_RANGE
+        )
+        stable_firing_solution = observation["line_of_sight"] and range_is_good and aligned
+        if stable_firing_solution:
+            if self.aim_acquired_since is None:
+                self.aim_acquired_since = task_time
+        else:
+            self.aim_acquired_since = None
+
+        aim_dwell_complete = (
+            self.aim_acquired_since is not None and
+            task_time - self.aim_acquired_since >= TACTICAL_AI_AIM_DWELL_SECONDS
+        )
         can_fire = (
             observation["line_of_sight"] and
             aligned and
+            range_is_good and
+            aim_dwell_complete and
             not observation["is_shooting"] and
             task_time >= self.next_fire_time
         )
@@ -780,9 +800,6 @@ class TacticalAiTankController(TankController):
                 fire=True
             )
 
-        range_is_good = (
-            TACTICAL_AI_MIN_RANGE <= observation["distance_to_player"] <= TACTICAL_AI_MAX_RANGE
-        )
         if observation["line_of_sight"] and range_is_good and task_time >= self.reposition_until:
             return TankCommand(
                 desired_world_pos=Point3(observation["tank_pos"]),
