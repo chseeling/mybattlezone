@@ -99,6 +99,7 @@ MAIN_CAMERA_MASK = BitMask32.bit(0)
 AUX_CAMERA_MASK = BitMask32.bit(1)
 DRONE_CAMERA_MASK = BitMask32.bit(2)
 DRONE_VIEW_SLOT = (0.72, 0.98, 0.02, 0.25)
+ENVIRONMENT_PREVIEW_SLOT = (0.68, 0.98, 0.04, 0.34)
 DRONE_BATTERY_MAX = 100
 DRONE_DEPLOY_MIN_BATTERY = 35
 DRONE_RETURN_BATTERY = 20
@@ -134,13 +135,39 @@ DRONE_CAMERA_MAX_TARGET_FOCUS = 0.62
 DRONE_BLUE = LVecBase4(0.12, 0.38, 1.0, 1)
 DRONE_CYAN = LVecBase4(0.0, 0.75, 1.0, 1)
 DRONE_DIM_BLUE = LVecBase4(0.02, 0.12, 0.32, 1)
-OBSTACLES = (
-    {"name": "Block-1", "kind": "block", "pos": Point3(18, 38, 0), "scale": Point3(7, 7, 5),
-     "radius": 6.0},
-    {"name": "Pyramid-1", "kind": "pyramid", "pos": Point3(-16, 32, 0), "scale": Point3(9, 9, 7),
-     "radius": 6.5},
-    {"name": "Cone-1", "kind": "cone", "pos": Point3(4, 68, 0), "scale": Point3(8, 8, 8),
-     "radius": 5.8},
+ENVIRONMENTS = (
+    {
+        "name": "SIMPLE RANGE",
+        "description": "OPEN TEST GROUND",
+        "obstacles": (
+            {"name": "Block-1", "kind": "block", "pos": Point3(18, 38, 0), "scale": Point3(7, 7, 5),
+             "radius": 6.0},
+            {"name": "Pyramid-1", "kind": "pyramid", "pos": Point3(-16, 32, 0), "scale": Point3(9, 9, 7),
+             "radius": 6.5},
+            {"name": "Cone-1", "kind": "cone", "pos": Point3(4, 68, 0), "scale": Point3(8, 8, 8),
+             "radius": 5.8},
+        ),
+    },
+    {
+        "name": "CITY BLOCK",
+        "description": "STREETS AND CORNERS",
+        "obstacles": (
+            {"name": "City-Block-W1", "kind": "block", "pos": Point3(-48, 42, 0), "scale": Point3(12, 18, 8),
+             "radius": 10.8},
+            {"name": "City-Block-E1", "kind": "block", "pos": Point3(48, 42, 0), "scale": Point3(12, 18, 7),
+             "radius": 10.8},
+            {"name": "City-Block-W2", "kind": "block", "pos": Point3(-48, 78, 0), "scale": Point3(12, 18, 9),
+             "radius": 10.8},
+            {"name": "City-Block-E2", "kind": "block", "pos": Point3(48, 78, 0), "scale": Point3(12, 18, 6),
+             "radius": 10.8},
+            {"name": "City-North-Block", "kind": "block", "pos": Point3(0, 92, 0), "scale": Point3(20, 12, 8),
+             "radius": 11.8},
+            {"name": "City-Plaza-Monument", "kind": "pyramid", "pos": Point3(0, 30, 0), "scale": Point3(7, 7, 10),
+             "radius": 5.5},
+            {"name": "City-North-Tower", "kind": "cone", "pos": Point3(0, 116, 0), "scale": Point3(8, 8, 13),
+             "radius": 6.0},
+        ),
+    },
 )
 RADAR_SWEEP_TRAILS = (
     (0, 0.55, 2),
@@ -804,6 +831,8 @@ class MyApp(ShowBase):
         grid_np.instanceTo(self.grid)
         self.grid.setColorScale(0.15, 0.2, 0.15, 1.0)
         self.grid.setPos(0, 0, -0.2)
+        self.environment_index = 0
+        self.active_obstacles = ENVIRONMENTS[self.environment_index]["obstacles"]
         self.render_obstacles()
 
         alight = AmbientLight('ambientLight')
@@ -817,6 +846,7 @@ class MyApp(ShowBase):
         self.render_tank_hud_labels()
         self.render_auxiliary_views()
         self.render_recon_drone()
+        self.render_environment_preview()
         self.display_filters = CommonFilters(base.win, base.cam)
         self.gpu_bloom_available = True
 
@@ -850,6 +880,9 @@ class MyApp(ShowBase):
         self.accept('d', self.toggle_recon_drone)
         self.accept('i', self.toggle_investigation)
         self.accept('r', self.restart_game)
+        self.accept('tab', self.cycle_environment)
+        self.accept('arrow_left', self.previous_environment)
+        self.accept('arrow_right', self.next_environment)
         self.accept('0', self.set_human_control_tank, extraArgs=["0"])
         for t in sorted(tanks_list):
             self.accept(t, self.set_human_control_tank, extraArgs=[t])
@@ -860,8 +893,9 @@ class MyApp(ShowBase):
             self.accept('into-' + 'cTank' + t, self.tank0_round_hit)
             self.accept('explosion{}-done'.format(t), self.explosion_cleanup, extraArgs=[t])
             self.accept('shot{}-done'.format(t), self.enemy_reset_shot, extraArgs=[t])
-        for obstacle in OBSTACLES:
-            self.accept('into-cObstacle-' + obstacle["name"], self.round_obstacle_hit)
+        for environment in ENVIRONMENTS:
+            for obstacle in environment["obstacles"]:
+                self.accept('into-cObstacle-' + obstacle["name"], self.round_obstacle_hit)
 
         # on-screen text
         vect = self.camera.getHpr()
@@ -873,6 +907,7 @@ class MyApp(ShowBase):
                                             fg=(0.4, 1.0, 0.4, 1), mayChange=True)
         self.bloomTextObject.reparentTo(self.render2d)
         self.set_bloom_enabled(self.bloom_enabled)
+        self.update_start_screen_presentation()
 
         self.ambient_snd.setLoop(True)
 
@@ -1327,7 +1362,110 @@ class MyApp(ShowBase):
 
         self.waiting_to_start = False
         self.startTextObject.hide()
+        for text_object in getattr(self, "environmentNameTextObjects", []):
+            text_object.hide()
+        self.environmentTextObject.hide()
+        self.update_start_screen_presentation()
         self.ambient_snd.play()
+
+    def update_start_screen_presentation(self):
+        waiting = getattr(self, "waiting_to_start", False)
+
+        if hasattr(self, "obstacle_group"):
+            if waiting:
+                self.obstacle_group.hide()
+            else:
+                self.obstacle_group.show()
+
+        if hasattr(self, "radar_np"):
+            if waiting:
+                self.radar_np.hide()
+            else:
+                self.radar_np.show()
+
+        if hasattr(self, "sight_clear_np"):
+            if waiting:
+                self.sight_clear_np.hide()
+                self.sight_engaged_np.hide()
+            else:
+                self.sight_clear_np.show()
+
+        self.set_auxiliary_views_visible(not waiting)
+        self.set_drone_view_visible(not waiting)
+        self.set_environment_preview_visible(waiting)
+
+    def set_auxiliary_views_visible(self, visible):
+        if hasattr(self, "panorama_overlay_region"):
+            self.panorama_overlay_region.setActive(visible)
+
+        for view in getattr(self, "auxiliary_cameras", []):
+            view["region"].setActive(visible)
+
+        for node in getattr(self, "auxiliary_hud_nodes", []):
+            if visible:
+                node.show()
+            else:
+                node.hide()
+
+    def set_drone_view_visible(self, visible):
+        if hasattr(self, "drone_display_region"):
+            self.drone_display_region.setActive(visible)
+
+        for node_name in ("drone_frame_np", "droneTextObject", "droneTitleObject"):
+            if not hasattr(self, node_name):
+                continue
+            node = getattr(self, node_name)
+            if visible:
+                node.show()
+            else:
+                node.hide()
+
+    def set_environment_preview_visible(self, visible):
+        if hasattr(self, "environment_preview_region"):
+            self.environment_preview_region.setActive(visible)
+
+        for node_name in ("environment_preview_frame_np", "environmentPreviewTitleObject"):
+            if not hasattr(self, node_name):
+                continue
+            node = getattr(self, node_name)
+            if visible:
+                node.show()
+            else:
+                node.hide()
+
+    def selected_environment(self):
+        return ENVIRONMENTS[self.environment_index]
+
+    def update_environment_hud(self):
+        if not hasattr(self, "environmentTextObject"):
+            return
+
+        environment = self.selected_environment()
+        for text_object in getattr(self, "environmentNameTextObjects", []):
+            text_object.text = environment["name"]
+        self.environmentTextObject.text = "{}\nTAB OR ARROWS TO CHANGE".format(
+            environment["description"]
+        )
+
+    def set_environment_index(self, index):
+        if not self.waiting_to_start:
+            return
+
+        self.environment_index = index % len(ENVIRONMENTS)
+        self.active_obstacles = self.selected_environment()["obstacles"]
+        self.render_obstacles()
+        self.build_environment_preview_scene()
+        self.update_environment_hud()
+        self.update_start_screen_presentation()
+
+    def next_environment(self):
+        self.set_environment_index(self.environment_index + 1)
+
+    def previous_environment(self):
+        self.set_environment_index(self.environment_index - 1)
+
+    def cycle_environment(self):
+        self.next_environment()
 
     def restart_game(self):
         if not self.game_over:
@@ -1347,6 +1485,9 @@ class MyApp(ShowBase):
         self.hit_flash_alpha = 0
         self.gameOverTextObject.hide()
         self.startTextObject.hide()
+        for text_object in getattr(self, "environmentNameTextObjects", []):
+            text_object.hide()
+        self.environmentTextObject.hide()
         self.hitFlashNp.hide()
         self.investigation_snd.stop()
         self.gameOver_snd.stop()
@@ -1410,6 +1551,9 @@ class MyApp(ShowBase):
             mountain_core.instanceTo(placeholder.attachNewNode("mountain-lines-Core"))
 
     def render_obstacles(self):
+        if hasattr(self, "obstacle_group"):
+            self.obstacle_group.removeNode()
+
         self.obstacle_group = render.attachNewNode("Obstacles")
         factories = {
             "block": procedural_block,
@@ -1417,7 +1561,7 @@ class MyApp(ShowBase):
             "cone": procedural_cone,
         }
 
-        for obstacle in OBSTACLES:
+        for obstacle in self.active_obstacles:
             lines = factories[obstacle["kind"]]()
             lines.setThickness(WORLD_LINE_THICKNESS)
             node_path = NodePath(lines.create())
@@ -1439,6 +1583,107 @@ class MyApp(ShowBase):
             add_obstacle_shot_solids(collision_np.node(), obstacle)
             if DEBUG:
                 collision_np.show()
+
+        if getattr(self, "waiting_to_start", False):
+            self.obstacle_group.hide()
+
+    def render_environment_preview(self):
+        self.environment_preview_root = NodePath("EnvironmentPreviewScene")
+        self.environment_preview_camera_np = NodePath(Camera("EnvironmentPreviewCamera"))
+        self.environment_preview_camera_np.node().setScene(self.environment_preview_root)
+
+        slot_left, slot_right, slot_bottom, slot_top = ENVIRONMENT_PREVIEW_SLOT
+        self.environment_preview_region = base.win.makeDisplayRegion(slot_left, slot_right, slot_bottom, slot_top)
+        self.environment_preview_region.setSort(13)
+        self.environment_preview_region.setClearColorActive(True)
+        self.environment_preview_region.setClearColor(Vec4(0, 0, 0, 1))
+        self.environment_preview_region.setCamera(self.environment_preview_camera_np)
+
+        lens = PerspectiveLens()
+        lens.setFov(38)
+        lens.setAspectRatio((slot_right - slot_left) * base.getAspectRatio() / (slot_top - slot_bottom))
+        self.environment_preview_camera_np.node().setLens(lens)
+
+        self.environment_preview_frame_np = render2d.attachNewNode("EnvironmentPreviewFrame")
+        self.environmentPreviewTitleObject = OnscreenText(text="ENVIRON",
+                                                          pos=(0, 0),
+                                                          align=TextNode.ACenter,
+                                                          scale=(0.024, 0.036),
+                                                          fg=(0.35, 1.0, 0.35, 1),
+                                                          mayChange=True)
+        self.environmentPreviewTitleObject.reparentTo(render2d)
+        self.update_environment_preview_overlay()
+        self.build_environment_preview_scene()
+
+    def environment_preview_bounds(self):
+        slot_left, slot_right, slot_bottom, slot_top = ENVIRONMENT_PREVIEW_SLOT
+        return slot_left * 2 - 1, slot_right * 2 - 1, slot_bottom * 2 - 1, slot_top * 2 - 1
+
+    def update_environment_preview_overlay(self):
+        if not hasattr(self, "environment_preview_frame_np"):
+            return
+
+        x0, x1, z0, z1 = self.environment_preview_bounds()
+        self.environment_preview_frame_np.node().removeAllChildren()
+        frame = LineSegs("EnvironmentPreviewFrame")
+        frame.setThickness(2)
+        frame.moveTo(x0, 0, z0)
+        frame.drawTo(x1, 0, z0)
+        frame.drawTo(x1, 0, z1)
+        frame.drawTo(x0, 0, z1)
+        frame.drawTo(x0, 0, z0)
+        self.environment_preview_frame_np.attachNewNode(frame.create())
+        self.environment_preview_frame_np.setColorScale(0, 0.65, 0.18, 1)
+        self.environmentPreviewTitleObject.setPos((x0 + x1) * 0.5, z1 + 0.04)
+
+        if hasattr(self, "environment_preview_camera_np"):
+            slot_left, slot_right, slot_bottom, slot_top = ENVIRONMENT_PREVIEW_SLOT
+            self.environment_preview_camera_np.node().getLens().setAspectRatio(
+                (slot_right - slot_left) * base.getAspectRatio() / (slot_top - slot_bottom)
+            )
+
+    def build_environment_preview_scene(self):
+        if not hasattr(self, "environment_preview_root"):
+            return
+
+        self.environment_preview_root.getChildren().detach()
+        factories = {
+            "block": procedural_block,
+            "pyramid": procedural_pyramid,
+            "cone": procedural_cone,
+        }
+
+        min_x = min(obstacle["pos"][0] - obstacle["scale"][0] * 0.5 for obstacle in self.active_obstacles)
+        max_x = max(obstacle["pos"][0] + obstacle["scale"][0] * 0.5 for obstacle in self.active_obstacles)
+        min_y = min(obstacle["pos"][1] - obstacle["scale"][1] * 0.5 for obstacle in self.active_obstacles)
+        max_y = max(obstacle["pos"][1] + obstacle["scale"][1] * 0.5 for obstacle in self.active_obstacles)
+        max_z = max(obstacle["scale"][2] for obstacle in self.active_obstacles)
+        center = Point3((min_x + max_x) * 0.5, (min_y + max_y) * 0.5, max_z * 0.35)
+        span = max(max_x - min_x, max_y - min_y, 24)
+
+        for obstacle in self.active_obstacles:
+            placeholder = self.environment_preview_root.attachNewNode(obstacle["name"] + "-Preview")
+            lines = factories[obstacle["kind"]]()
+            lines.setThickness(WORLD_LINE_THICKNESS)
+            line_np = placeholder.attachNewNode(lines.create())
+            line_np.setColorScale(0, 0.8, 0.22, 1)
+            face_np = placeholder.attachNewNode(create_structure_faces(obstacle["kind"]).node())
+            face_np.setTransparency(TransparencyAttrib.MAlpha, 20)
+            face_np.setColorScale(0, 0.8, 0.22, 0.18, 20)
+            face_np.setBin("transparent", 0)
+            face_np.setDepthWrite(False, 20)
+            placeholder.setPos(obstacle["pos"])
+            placeholder.setScale(obstacle["scale"])
+
+        ground_lines = procedural_grid(min_x - 8, max_x + 8, min_y - 8, max_y + 8, 8)
+        ground_lines.setThickness(1)
+        ground_np = self.environment_preview_root.attachNewNode(ground_lines.create())
+        ground_np.setColorScale(0.05, 0.28, 0.08, 1)
+        ground_np.setZ(-0.05)
+
+        camera_pos = Point3(center[0] + span * 0.85, center[1] - span * 1.05, max_z + span * 0.75)
+        self.environment_preview_camera_np.setPos(camera_pos)
+        self.environment_preview_camera_np.lookAt(center)
 
     def render_sight(self):
         ls = procedural_sight(LineSegs(), True, False)
@@ -1554,6 +1799,22 @@ class MyApp(ShowBase):
                                             align=TextNode.ACenter, scale=(0.075, 0.1),
                                             fg=(0.4, 1.0, 0.4, 1), mayChange=True)
         self.startTextObject.reparentTo(aspect2d)
+
+        self.environmentNameTextObjects = []
+        for offset_x, offset_z in ((0, 0), (0.003, 0), (-0.003, 0), (0, 0.003)):
+            environment_name = OnscreenText(text="",
+                                            pos=(offset_x, -0.16 + offset_z),
+                                            align=TextNode.ACenter, scale=(0.055, 0.078),
+                                            fg=(0.38, 1.0, 0.42, 1), mayChange=True)
+            environment_name.reparentTo(aspect2d)
+            self.environmentNameTextObjects.append(environment_name)
+
+        self.environmentTextObject = OnscreenText(text="",
+                                                  pos=(0, -0.29),
+                                                  align=TextNode.ACenter, scale=(0.04, 0.058),
+                                                  fg=(0.25, 0.85, 0.35, 1), mayChange=True)
+        self.environmentTextObject.reparentTo(aspect2d)
+        self.update_environment_hud()
 
         card = CardMaker("player-hit-flash")
         card.setFrameFullscreenQuad()
@@ -1684,6 +1945,7 @@ class MyApp(ShowBase):
 
     def render_auxiliary_views(self):
         self.auxiliary_cameras = []
+        self.auxiliary_hud_nodes = []
         self.panorama_overlay_root = NodePath("PanoramaOverlay")
         overlay_camera_node = Camera("PanoramaOverlayCamera")
         overlay_camera_node.setLens(base.cam2d.node().getLens())
@@ -1758,6 +2020,7 @@ class MyApp(ShowBase):
             frame.drawTo(x0, 0, z0)
             frame_np = aspect2d.attachNewNode(frame.create())
             frame_np.setColorScale(0, 0.55, 0, 1)
+            self.auxiliary_hud_nodes.append(frame_np)
 
             if view["name"] == "PANORAMA":
                 self.render_panorama_main_view_edges(view, x0, x1, z0, z1)
@@ -1766,6 +2029,7 @@ class MyApp(ShowBase):
                                  align=TextNode.ACenter, scale=(0.025, 0.038),
                                  fg=(0.35, 1.0, 0.35, 1), mayChange=False)
             label.reparentTo(aspect2d)
+            self.auxiliary_hud_nodes.append(label)
 
         self.hide_bloom_from_auxiliary_views()
 
@@ -1789,6 +2053,7 @@ class MyApp(ShowBase):
         marker_np = self.panorama_overlay_root.attachNewNode(markers.create())
         marker_np.setScale(1 / base.getAspectRatio(), 1, 1)
         marker_np.setColorScale(0.0, 0.45, 0.65, 1)
+        self.auxiliary_hud_nodes.append(marker_np)
 
     def render_recon_drone(self):
         self.drone_state = "DOCKED"
@@ -1888,7 +2153,27 @@ class MyApp(ShowBase):
         if window != base.win:
             return
 
+        if hasattr(window, "isClosed") and window.isClosed():
+            self.userExit()
+            return
+
         self.update_drone_view_overlay()
+        self.update_environment_preview_overlay()
+
+    def stop_all_game_sounds(self):
+        for sound in (
+            self.ambient_snd,
+            self.mainShot_snd,
+            self.enemyShot_snd,
+            self.enemyTankExplosion_snd,
+            self.gameOver_snd,
+            self.investigation_snd,
+        ):
+            sound.stop()
+
+    def userExit(self):
+        self.stop_all_game_sounds()
+        ShowBase.userExit(self)
 
     def hide_bloom_from_auxiliary_views(self):
         camera_mask = AUX_CAMERA_MASK | DRONE_CAMERA_MASK
@@ -1969,7 +2254,7 @@ class MyApp(ShowBase):
         for t in tanks_list:
             if not tanks_dict[t]["tank"].isHidden():
                 points.append(Point3(tanks_dict[t]["tank"].getPos(render)))
-        for obstacle in OBSTACLES:
+        for obstacle in self.active_obstacles:
             points.append(Point3(obstacle["pos"]))
 
         center = Point3(0, 0, DRONE_CAMERA_SCENE_HEIGHT)
@@ -2252,7 +2537,7 @@ class MyApp(ShowBase):
 
     def resolve_obstacle_position(self, pos, body_radius):
         resolved = Point3(pos)
-        for obstacle in OBSTACLES:
+        for obstacle in self.active_obstacles:
             obstacle_pos = obstacle["pos"]
             min_dist = obstacle["radius"] + body_radius
             dx = resolved[0] - obstacle_pos[0]
@@ -2368,7 +2653,7 @@ class MyApp(ShowBase):
 
     def find_shot_obstacle_hit(self, start, end):
         closest_hit = None
-        for obstacle in OBSTACLES:
+        for obstacle in self.active_obstacles:
             for triangle in self.obstacle_shot_triangles(obstacle):
                 hit = self.segment_triangle_hit(start, end, triangle)
                 if not hit:
