@@ -88,6 +88,10 @@ PLAYER_FLASH_SECONDS = 0.45
 PLAYER_COLLISION_RADIUS = 1.5
 TANK_COLLISION_RADIUS = 1.6
 AUTONOMOUS_TANK_MAX_SPEED = 9.0
+PLAYER_CAMERA_HEIGHT = 2.0
+START_CAMERA_TERRAIN_CLEARANCE = 4.0
+TERRAIN_SLOPE_SAMPLE_DISTANCE = 3.0
+TERRAIN_SLOPE_RESPONSE = 0.75
 INVESTIGATE_WINDOW_SECONDS = 4.0
 INVESTIGATE_FATAL_WINDOW_SECONDS = 999999.0
 INVESTIGATION_GHOST_SPEED = 51.0
@@ -140,6 +144,7 @@ ENVIRONMENTS = (
     {
         "name": "SIMPLE RANGE",
         "description": "OPEN TEST GROUND",
+        "terrain": {"amplitude": 2.1, "frequency": 0.018, "cross_frequency": 0.012},
         "obstacles": (
             {"name": "Block-1", "kind": "block", "pos": Point3(18, 38, 0), "scale": Point3(7, 7, 5),
              "radius": 6.0},
@@ -152,6 +157,7 @@ ENVIRONMENTS = (
     {
         "name": "CITY BLOCK",
         "description": "STREETS AND CORNERS",
+        "terrain": {"amplitude": 0.65, "frequency": 0.012, "cross_frequency": 0.009},
         "obstacles": (
             {"name": "City-Block-W1", "kind": "block", "pos": Point3(-48, 42, 0), "scale": Point3(12, 18, 8),
              "radius": 10.8},
@@ -177,27 +183,49 @@ RADAR_SWEEP_TRAILS = (
 )
 
 
-def procedural_grid(x_min, x_max, y_min, y_max, n):
+def terrain_height(x, y, terrain):
+    if not terrain:
+        return 0.1
+
+    amplitude = terrain.get("amplitude", 0)
+    frequency = terrain.get("frequency", 0.015)
+    cross_frequency = terrain.get("cross_frequency", frequency * 0.7)
+    return 0.1 + amplitude * (
+        0.55 * sin(x * frequency) +
+        0.35 * cos(y * frequency * 0.83) +
+        0.25 * sin((x + y) * cross_frequency)
+    )
+
+
+def procedural_grid(x_min, x_max, y_min, y_max, n, terrain=None, subdivisions=6):
     del_x = (x_max - x_min) / n
     del_y = (y_max - y_min) / n
 
     lines = LineSegs()
     # constant y lines
-    x0 = x_min
-    x1 = x_max
     y0 = y_min
     for i in range(0, n + 1):
-        lines.moveTo(x0, y0, 0.1)
-        lines.draw_to(x1, y0, 0.1)
+        segment_count = n * subdivisions
+        for segment in range(segment_count + 1):
+            x = x_min + (x_max - x_min) * segment / segment_count
+            z = terrain_height(x, y0, terrain)
+            if segment == 0:
+                lines.moveTo(x, y0, z)
+            else:
+                lines.draw_to(x, y0, z)
         y0 += del_y
 
     # constant x lines
-    y0 = y_min
-    y1 = y_max
     x0 = x_min
     for i in range(0, n + 1):
-        lines.moveTo(x0, y0, 0.1)
-        lines.draw_to(x0, y1, 0.1)
+        segment_count = n * subdivisions
+        for segment in range(segment_count + 1):
+            y = y_min + (y_max - y_min) * segment / segment_count
+            z = terrain_height(x0, y, terrain)
+            if segment == 0:
+                lines.moveTo(x0, y, z)
+            else:
+                lines.draw_to(x0, y, z)
         x0 += del_x
 
     return lines
@@ -823,17 +851,9 @@ class MyApp(ShowBase):
             traverser.addCollider(np, self.collHandEvent)
 
 
-        # grid
-        grid_lines = procedural_grid(-1000, 500, -1000, 500, 50)
-        grid_lines.setThickness(1)
-        node = grid_lines.create()
-        grid_np = NodePath(node)
-        self.grid = render.attachNewNode("Grid")
-        grid_np.instanceTo(self.grid)
-        self.grid.setColorScale(0.15, 0.2, 0.15, 1.0)
-        self.grid.setPos(0, 0, -0.2)
         self.environment_index = 0
         self.active_obstacles = ENVIRONMENTS[self.environment_index]["obstacles"]
+        self.render_grid()
         self.render_obstacles()
 
         alight = AmbientLight('ambientLight')
@@ -908,6 +928,7 @@ class MyApp(ShowBase):
                                             fg=(0.4, 1.0, 0.4, 1), mayChange=True)
         self.bloomTextObject.reparentTo(self.render2d)
         self.set_bloom_enabled(self.bloom_enabled)
+        self.position_start_camera()
         self.update_start_screen_presentation()
 
         self.ambient_snd.setLoop(True)
@@ -1362,6 +1383,9 @@ class MyApp(ShowBase):
             return
 
         self.waiting_to_start = False
+        self.camera.setPos(render, self.terrain_position(Point3(0, 0, 0), PLAYER_CAMERA_HEIGHT))
+        self.camera.setHpr(0, 0, 0)
+        self.set_player_camera_on_terrain()
         self.startTextObject.hide()
         for text_object in getattr(self, "environmentNameTextObjects", []):
             text_object.hide()
@@ -1437,6 +1461,69 @@ class MyApp(ShowBase):
     def selected_environment(self):
         return ENVIRONMENTS[self.environment_index]
 
+    def selected_terrain(self):
+        return self.selected_environment().get("terrain")
+
+    def terrain_z(self, x, y):
+        return terrain_height(x, y, self.selected_terrain())
+
+    def terrain_position(self, pos, height_offset=0):
+        return Point3(pos[0], pos[1], self.terrain_z(pos[0], pos[1]) + height_offset)
+
+    def terrain_surface_hpr(self, x, y, heading=0, forward_axis="y"):
+        sample = TERRAIN_SLOPE_SAMPLE_DISTANCE
+        heading_radians = math.radians(heading)
+        if forward_axis == "x":
+            forward_x = math.cos(heading_radians)
+            forward_y = math.sin(heading_radians)
+            right_x = -math.sin(heading_radians)
+            right_y = math.cos(heading_radians)
+        else:
+            forward_x = math.sin(heading_radians)
+            forward_y = math.cos(heading_radians)
+            right_x = math.cos(heading_radians)
+            right_y = -math.sin(heading_radians)
+
+        forward_rise = (
+            self.terrain_z(x + forward_x * sample, y + forward_y * sample) -
+            self.terrain_z(x - forward_x * sample, y - forward_y * sample)
+        )
+        right_rise = (
+            self.terrain_z(x + right_x * sample, y + right_y * sample) -
+            self.terrain_z(x - right_x * sample, y - right_y * sample)
+        )
+        pitch = -math.degrees(math.atan2(forward_rise, sample * 2)) * TERRAIN_SLOPE_RESPONSE
+        roll = math.degrees(math.atan2(right_rise, sample * 2)) * TERRAIN_SLOPE_RESPONSE
+        return heading, pitch, roll
+
+    def set_player_camera_on_terrain(self):
+        pos = self.camera.getPos(render)
+        heading = self.camera.getH(render)
+        self.camera.setPos(render, self.terrain_position(pos, PLAYER_CAMERA_HEIGHT))
+        hpr = self.terrain_surface_hpr(pos[0], pos[1], heading, "y")
+        self.camera.setHpr(render, hpr[0], hpr[1], hpr[2])
+
+    def obstacle_surface_pos(self, obstacle):
+        return self.terrain_position(obstacle["pos"])
+
+    def obstacle_surface_hpr(self, obstacle):
+        pos = obstacle["pos"]
+        return self.terrain_surface_hpr(pos[0], pos[1], obstacle.get("heading", 0), "y")
+
+    def obstacle_world_point(self, obstacle, local_point):
+        if not hasattr(self, "obstacle_transform_np"):
+            self.obstacle_transform_np = render.attachNewNode("ObstacleTransform")
+            self.obstacle_transform_np.hide()
+
+        self.obstacle_transform_np.setPos(render, self.obstacle_surface_pos(obstacle))
+        self.obstacle_transform_np.setHpr(render, self.obstacle_surface_hpr(obstacle))
+        return render.getRelativePoint(self.obstacle_transform_np, local_point)
+
+    def position_start_camera(self):
+        terrain_z = terrain_height(0, 0, self.selected_terrain())
+        self.camera.setPos(0, 0, max(PLAYER_CAMERA_HEIGHT, terrain_z + START_CAMERA_TERRAIN_CLEARANCE))
+        self.camera.setHpr(0, 0, 0)
+
     def update_environment_hud(self):
         if not hasattr(self, "environmentTextObject"):
             return
@@ -1454,9 +1541,11 @@ class MyApp(ShowBase):
 
         self.environment_index = index % len(ENVIRONMENTS)
         self.active_obstacles = self.selected_environment()["obstacles"]
+        self.render_grid()
         self.render_obstacles()
         self.build_environment_preview_scene()
         self.update_environment_hud()
+        self.position_start_camera()
         self.update_start_screen_presentation()
 
     def next_environment(self):
@@ -1493,8 +1582,9 @@ class MyApp(ShowBase):
         self.investigation_snd.stop()
         self.gameOver_snd.stop()
         self.ambient_snd.play()
-        self.camera.setPos(0, 0, 2)
+        self.camera.setPos(render, self.terrain_position(Point3(0, 0, 0), PLAYER_CAMERA_HEIGHT))
         self.camera.setHpr(0, 0, 0)
+        self.set_player_camera_on_terrain()
         self.reset_shot()
         for t in tanks_list:
             tanks_dict[t]["move"] = True
@@ -1551,6 +1641,18 @@ class MyApp(ShowBase):
 
             mountain_core.instanceTo(placeholder.attachNewNode("mountain-lines-Core"))
 
+    def render_grid(self):
+        if hasattr(self, "grid"):
+            self.grid.removeNode()
+
+        grid_lines = procedural_grid(-1000, 500, -1000, 500, 50, self.selected_terrain())
+        grid_lines.setThickness(1)
+        grid_np = NodePath(grid_lines.create())
+        self.grid = render.attachNewNode("Grid")
+        grid_np.instanceTo(self.grid)
+        self.grid.setColorScale(0.15, 0.2, 0.15, 1.0)
+        self.grid.setPos(0, 0, -0.2)
+
     def render_obstacles(self):
         if hasattr(self, "obstacle_group"):
             self.obstacle_group.removeNode()
@@ -1575,12 +1677,14 @@ class MyApp(ShowBase):
             faces_np.setBin("transparent", 0)
             faces_np.setDepthWrite(False, 20)
             node_path.instanceTo(placeholder.attachNewNode(obstacle["name"] + "-Lines"))
-            placeholder.setPos(obstacle["pos"])
+            placeholder.setPos(render, self.obstacle_surface_pos(obstacle))
+            placeholder.setHpr(render, self.obstacle_surface_hpr(obstacle))
             placeholder.setScale(obstacle["scale"])
             placeholder.find("**/*-Lines").setColorScale(0, 0.55, 0.15, 1.0)
 
             collision_np = self.obstacle_group.attachNewNode(CollisionNode("cObstacle-" + obstacle["name"]))
-            collision_np.setPos(obstacle["pos"])
+            collision_np.setPos(render, self.obstacle_surface_pos(obstacle))
+            collision_np.setHpr(render, self.obstacle_surface_hpr(obstacle))
             add_obstacle_shot_solids(collision_np.node(), obstacle)
             if DEBUG:
                 collision_np.show()
@@ -1673,10 +1777,11 @@ class MyApp(ShowBase):
             face_np.setColorScale(0, 0.8, 0.22, 0.18, 20)
             face_np.setBin("transparent", 0)
             face_np.setDepthWrite(False, 20)
-            placeholder.setPos(obstacle["pos"])
+            placeholder.setPos(self.obstacle_surface_pos(obstacle))
+            placeholder.setHpr(self.obstacle_surface_hpr(obstacle))
             placeholder.setScale(obstacle["scale"])
 
-        ground_lines = procedural_grid(min_x - 8, max_x + 8, min_y - 8, max_y + 8, 8)
+        ground_lines = procedural_grid(min_x - 8, max_x + 8, min_y - 8, max_y + 8, 8, self.selected_terrain(), 4)
         ground_lines.setThickness(1)
         ground_np = self.environment_preview_root.attachNewNode(ground_lines.create())
         ground_np.setColorScale(0.05, 0.28, 0.08, 1)
@@ -1784,10 +1889,10 @@ class MyApp(ShowBase):
         self.player_shot_interval = None
         self.player_shot_deflected = False
 
-        self.livesTextObject = OnscreenText(text="", pos=(-1.28, 0.9),
+        self.livesTextObject = OnscreenText(text="", pos=(-0.5, -0.78),
                                             align=TextNode.ALeft, scale=(0.04, 0.06),
                                             fg=(0.4, 1.0, 0.4, 1), mayChange=True)
-        self.livesTextObject.reparentTo(aspect2d)
+        self.livesTextObject.reparentTo(render2d)
 
         self.gameOverTextObject = OnscreenText(text="GAME OVER\nR TO RESTART", pos=(0, 0.08),
                                                align=TextNode.ACenter, scale=(0.08, 0.1),
@@ -2586,7 +2691,7 @@ class MyApp(ShowBase):
         height = scale[2]
 
         def world(point):
-            return Point3(pos[0] + point[0], pos[1] + point[1], pos[2] + point[2])
+            return self.obstacle_world_point(obstacle, Point3(point[0], point[1], point[2]))
 
         triangles = []
         if obstacle["kind"] == "block":
@@ -2792,7 +2897,7 @@ class MyApp(ShowBase):
                 self.camera.getPos(render) + step,
                 self.tank_avatars["0"].collision_radius
             )
-            self.camera.setPos(render, next_pos)
+            self.camera.setPos(render, self.terrain_position(next_pos, PLAYER_CAMERA_HEIGHT))
 
         if command.fire:
             self.shoot()
@@ -2813,9 +2918,12 @@ class MyApp(ShowBase):
                 tank_np.getPos(render) + step,
                 self.tank_avatars[t].collision_radius
             )
-            local_pos = tanks_dict[t]["Locator"].getRelativePoint(render, avoided_world)
-            tanks_dict[t]["last_pos"] = Point3(avoided_world)
-            tank_np.setPos(local_pos[0], local_pos[1], 0)
+            surface_world = self.terrain_position(avoided_world)
+            local_pos = tanks_dict[t]["Locator"].getRelativePoint(render, surface_world)
+            tanks_dict[t]["last_pos"] = Point3(surface_world)
+            tank_np.setPos(local_pos)
+            heading = tank_np.getH(render)
+            tank_np.setHpr(render, *self.terrain_surface_hpr(surface_world[0], surface_world[1], heading, "x"))
 
     def apply_autonomous_tank_command(self, t, command, dt):
         if command.desired_world_pos is None:
@@ -2845,18 +2953,19 @@ class MyApp(ShowBase):
             candidate_world,
             self.tank_avatars[t].collision_radius
         )
-        local_pos = locator.getRelativePoint(render, avoided_world)
+        surface_world = self.terrain_position(avoided_world)
+        local_pos = locator.getRelativePoint(render, surface_world)
         heading = command.desired_heading
 
         previous_world = tanks_dict[t].get("last_pos", current_world)
-        move_dx = avoided_world[0] - previous_world[0]
-        move_dy = avoided_world[1] - previous_world[1]
+        move_dx = surface_world[0] - previous_world[0]
+        move_dy = surface_world[1] - previous_world[1]
         if abs(move_dx) + abs(move_dy) > 0.001:
             heading = math.degrees(math.atan2(move_dy, move_dx))
 
-        tanks_dict[t]["last_pos"] = Point3(avoided_world)
-        tanks_dict[t]["tank"].setPos(local_pos[0], local_pos[1], 0)
-        tanks_dict[t]["tank"].setH(heading)
+        tanks_dict[t]["last_pos"] = Point3(surface_world)
+        tanks_dict[t]["tank"].setPos(local_pos)
+        tanks_dict[t]["tank"].setHpr(render, *self.terrain_surface_hpr(surface_world[0], surface_world[1], heading, "x"))
 
     def fire_enemy_tank(self, t):
         print('Tank {} shooting'.format(t))
@@ -3046,10 +3155,7 @@ class MyApp(ShowBase):
         # rad = 100
         # self.camera.setPos(rad * sin(angleRadians), rad * cos(angleRadians), 4)
         # self.camera.headsUp(tanks_dict['1']["tank"], Vec3(0, 0, 1))
-        pos = self.camera.getPos()
-        self.camera.setPos(pos[0], pos[1], 2)
-        ort = self.camera.getHpr()
-        self.camera.setHpr(ort[0], 0, 0)
+        self.set_player_camera_on_terrain()
 
         vectH = self.camera.getHpr()
         vectP = self.camera.getPos()
