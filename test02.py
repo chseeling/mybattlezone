@@ -30,6 +30,7 @@ arrow_right = KeyboardButton.right()
 arrow_left = KeyboardButton.left()
 arrow_back = KeyboardButton.down()
 arrow_forward = KeyboardButton.up()
+shift_key = KeyboardButton.shift()
 GG = LVecBase4(0, 1, 0, 1)  # game green constant
 camera_dict = {"turn_ang_vel": 21.6, "translate_vel": 30.0}
 NUMET = 2  # number of enemy tanks
@@ -98,7 +99,14 @@ TACTICAL_AI_IDEAL_RANGE = 72.0
 TACTICAL_AI_MIN_RANGE = 34.0
 TACTICAL_AI_MAX_RANGE = 145.0
 TACTICAL_AI_REPOSITION_SECONDS = 2.4
-TACTICAL_AI_FIRE_COOLDOWN = 1.8
+TACTICAL_AI_FIRE_COOLDOWN = 3.6
+PLAYER_BARREL_TILT_MIN = -8.0
+PLAYER_BARREL_TILT_MAX = 12.0
+PLAYER_BARREL_TILT_RATE = 18.0
+PLAYER_BARREL_AIM_REFERENCE_DISTANCE = 500.0
+PLAYER_SHOT_START_Y = 20.0
+PLAYER_SHOT_START_Z = -0.2
+PLAYER_SHOT_BACKTRACE_DISTANCE = 20.0
 INVESTIGATE_WINDOW_SECONDS = 4.0
 INVESTIGATE_FATAL_WINDOW_SECONDS = 999999.0
 INVESTIGATION_GHOST_SPEED = 51.0
@@ -578,11 +586,12 @@ def create_radar_sweep_slice(radius, arc_degrees, max_alpha, segments=18):
 
 
 class TankCommand:
-    def __init__(self, throttle=0.0, turn=0.0, fire=False,
+    def __init__(self, throttle=0.0, turn=0.0, fire=False, barrel_tilt=0.0,
                  desired_world_pos=None, desired_heading=None):
         self.throttle = throttle
         self.turn = turn
         self.fire = fire
+        self.barrel_tilt = barrel_tilt
         self.desired_world_pos = desired_world_pos
         self.desired_heading = desired_heading
 
@@ -625,16 +634,24 @@ class HumanTankController(TankController):
         is_down = base.mouseWatcherNode.is_button_down
         turn = 0.0
         throttle = 0.0
+        barrel_tilt = 0.0
+        is_adjusting_barrel = is_down(shift_key)
         if is_down(arrow_right):
             turn -= 1.0
         if is_down(arrow_left):
             turn += 1.0
-        if is_down(arrow_back):
-            throttle -= 1.0
-        if is_down(arrow_forward):
-            throttle += 1.0
+        if is_adjusting_barrel:
+            if is_down(arrow_back):
+                barrel_tilt -= 1.0
+            if is_down(arrow_forward):
+                barrel_tilt += 1.0
+        else:
+            if is_down(arrow_back):
+                throttle -= 1.0
+            if is_down(arrow_forward):
+                throttle += 1.0
 
-        return TankCommand(throttle=throttle, turn=turn, fire=fire)
+        return TankCommand(throttle=throttle, turn=turn, fire=fire, barrel_tilt=barrel_tilt)
 
 
 class RemoteTankController(TankController):
@@ -666,6 +683,7 @@ class RemoteTankController(TankController):
             throttle=command.throttle,
             turn=command.turn,
             fire=False,
+            barrel_tilt=command.barrel_tilt,
             desired_world_pos=command.desired_world_pos,
             desired_heading=command.desired_heading
         )
@@ -876,7 +894,7 @@ class MyApp(ShowBase):
         np_round.instanceTo(self.tank_round[0])
         # self.tank_round[0].hide()
         self.tank_round[0].setColorScale(0.3, 0.3, 1.0, 1.0)
-        self.tank_round[0].setPos(0, 20, -0.2 - 10)
+        self.tank_round[0].setPos(0, PLAYER_SHOT_START_Y, PLAYER_SHOT_START_Z - 10)
         self.tank_round[0].setHpr(self.tank_round[0], 0, 90, 0)
         self.tank_round[0].setScale(0.2, 0.2, 0.2)
         self.tank_round[0].reparentTo(camera)
@@ -955,6 +973,7 @@ class MyApp(ShowBase):
 
         self.environment_index = 0
         self.active_obstacles = ENVIRONMENTS[self.environment_index]["obstacles"]
+        self.player_barrel_tilt = 0.0
         self.render_grid()
         self.render_obstacles()
 
@@ -1000,6 +1019,7 @@ class MyApp(ShowBase):
         self.accept('control-up', self.shot_clear)
         self.accept('shot-done', self.reset_shot)
         self.accept('b', self.toggle_bloom)
+        self.accept('s', self.toggle_enemy_shooting)
         self.accept('d', self.toggle_recon_drone)
         self.accept('i', self.toggle_investigation)
         self.accept('r', self.restart_game)
@@ -1491,6 +1511,7 @@ class MyApp(ShowBase):
         self.camera.setPos(render, self.terrain_position(Point3(0, 0, 0), PLAYER_CAMERA_HEIGHT))
         self.camera.setHpr(0, 0, 0)
         self.set_player_camera_on_terrain()
+        self.player_barrel_tilt = 0.0
         self.startTextObject.hide()
         for text_object in getattr(self, "environmentNameTextObjects", []):
             text_object.hide()
@@ -1517,8 +1538,10 @@ class MyApp(ShowBase):
             if waiting:
                 self.sight_clear_np.hide()
                 self.sight_engaged_np.hide()
+                self.barrelAimMarkerNp.hide()
             else:
                 self.sight_clear_np.show()
+                self.update_barrel_aim_marker()
 
         self.set_auxiliary_views_visible(not waiting)
         self.set_drone_view_visible(not waiting)
@@ -1690,6 +1713,8 @@ class MyApp(ShowBase):
         self.camera.setPos(render, self.terrain_position(Point3(0, 0, 0), PLAYER_CAMERA_HEIGHT))
         self.camera.setHpr(0, 0, 0)
         self.set_player_camera_on_terrain()
+        self.player_barrel_tilt = 0.0
+        self.update_barrel_aim_marker()
         self.reset_shot()
         for t in tanks_list:
             tanks_dict[t]["move"] = True
@@ -1917,6 +1942,34 @@ class MyApp(ShowBase):
         self.sight_engaged_np.reparentTo(render2d)
         self.sight_engaged_np.hide()
 
+        aim_marker = LineSegs("barrel-tilt-aim-marker")
+        aim_marker.setThickness(3)
+        aim_marker.moveTo(-0.12, 0, 0)
+        aim_marker.drawTo(0.12, 0, 0)
+        aim_marker.moveTo(0, 0, -0.035)
+        aim_marker.drawTo(0, 0, 0.035)
+        self.barrelAimMarkerNp = NodePath(aim_marker.create())
+        self.barrelAimMarkerNp.setColorScale(0.0, 0.85, 0.18, 1.0)
+        self.barrelAimMarkerNp.reparentTo(render2d)
+        self.update_barrel_aim_marker()
+
+    def update_barrel_aim_marker(self):
+        if not hasattr(self, "barrelAimMarkerNp"):
+            return
+
+        if getattr(self, "waiting_to_start", False):
+            self.barrelAimMarkerNp.hide()
+            return
+
+        aim_point = self.player_barrel_aim_point_local()
+        projected = Point2()
+        if aim_point[1] <= 0 or not self.camLens.project(aim_point, projected):
+            self.barrelAimMarkerNp.hide()
+            return
+
+        self.barrelAimMarkerNp.setPos(projected[0], 0, projected[1])
+        self.barrelAimMarkerNp.show()
+
     def render_radar(self):
         self.radar_np = aspect2d.attachNewNode("Radar")
         self.radar_np.setPos(-base.getAspectRatio() + RADAR_RADIUS + RADAR_MARGIN,
@@ -1993,6 +2046,8 @@ class MyApp(ShowBase):
         self.investigation_drone_saved_state = None
         self.player_shot_interval = None
         self.player_shot_deflected = False
+        self.enemy_shooting_suspended = False
+        self.player_barrel_tilt = 0.0
 
         self.livesTextObject = OnscreenText(text="", pos=(-0.5, -0.78),
                                             align=TextNode.ALeft, scale=(0.04, 0.06),
@@ -3017,10 +3072,18 @@ class MyApp(ShowBase):
         else:
             self.apply_direct_tank_command(tank_id, command, dt)
 
-        if command.fire and not tanks_dict[tank_id]["shooting"]:
+        if command.fire and not self.enemy_shooting_suspended and not tanks_dict[tank_id]["shooting"]:
             self.fire_enemy_tank(tank_id)
 
     def apply_player_tank_command(self, command, dt):
+        if command.barrel_tilt:
+            tilt_step = PLAYER_BARREL_TILT_RATE * dt * command.barrel_tilt
+            self.player_barrel_tilt = max(
+                PLAYER_BARREL_TILT_MIN,
+                min(PLAYER_BARREL_TILT_MAX, self.player_barrel_tilt + tilt_step)
+            )
+            self.update_barrel_aim_marker()
+
         if command.turn:
             turn_step = camera_dict["turn_ang_vel"] * dt * command.turn
             self.camera.setHpr(self.camera, turn_step, 0, 0)
@@ -3036,6 +3099,19 @@ class MyApp(ShowBase):
 
         if command.fire:
             self.shoot()
+
+    def player_barrel_aim_point_local(self):
+        reference_distance = PLAYER_BARREL_AIM_REFERENCE_DISTANCE
+        tilt_radians = math.radians(getattr(self, "player_barrel_tilt", 0.0))
+        return Point3(
+            0,
+            reference_distance,
+            math.tan(tilt_radians) * reference_distance
+        )
+
+    def player_shot_direction(self, shot_start):
+        aim_world = render.getRelativePoint(self.camera, self.player_barrel_aim_point_local())
+        return self.normalize3(aim_world - shot_start)
 
     def apply_direct_tank_command(self, t, command, dt):
         if not tanks_dict[t]["move"] or self.tank_avatars[t].is_hidden():
@@ -3135,7 +3211,7 @@ class MyApp(ShowBase):
         self.player_shot_deflected = False
         self.tank_round[0].hide()
         self.tank_round[0].reparentTo(self.camera)
-        self.tank_round[0].setPos(0, 20, -0.2 - 10)
+        self.tank_round[0].setPos(0, PLAYER_SHOT_START_Y, PLAYER_SHOT_START_Z - 10)
         self.tank_round[0].setHpr(0, 90, 0)
 
     def enemy_reset_shot(self, t):
@@ -3159,7 +3235,16 @@ class MyApp(ShowBase):
         if self.game_over or self.investigation_mode:
             return
 
+        if self.player_shot_interval is not None:
+            return
+
         self.human_tank_controller.request_fire()
+
+    def toggle_enemy_shooting(self):
+        if self.waiting_to_start:
+            return
+
+        self.enemy_shooting_suspended = not self.enemy_shooting_suspended
 
     def shoot(self):
         if self.waiting_to_start:
@@ -3169,18 +3254,22 @@ class MyApp(ShowBase):
         if self.game_over or self.investigation_mode:
             return
 
-        self.tank_round[0].setPos(0, 20, -0.2)
+        if self.player_shot_interval is not None:
+            return
+
+        self.tank_round[0].setPos(0, PLAYER_SHOT_START_Y, PLAYER_SHOT_START_Z)
         self.sight_engaged_np.show()
         self.sight_clear_np.hide()
 
         self.tank_round[0].wrtReparentTo(render)
         # print(self.tank_round[0].getPos(), self.tank_round[0].getHpr())
-        ShootAt = render.getRelativeVector(base.camera, (0, 1, 0))
+        shot_start = Point3(self.tank_round[0].getPos(render))
+        ShootAt = self.player_shot_direction(shot_start)
         # self.tank_round[0].setPos(self.tank_round[0].getPos() + ShootAt)
 
         self.tank_round[0].show()
         self.mainShot_snd.play()
-        shot_start = Point3(self.tank_round[0].getPos(render))
+        collision_start = Point3(shot_start - ShootAt * PLAYER_SHOT_BACKTRACE_DISTANCE)
         i, shot_end, shot_deflected = self.create_shot_interval(
             self.tank_round[0],
             shot_start,
@@ -3188,7 +3277,7 @@ class MyApp(ShowBase):
             200,
             1.1,
             'shot-done',
-            self.camera.getPos(render)
+            collision_start
         )
         self.player_shot_interval = i
         self.player_shot_deflected = shot_deflected
@@ -3296,8 +3385,11 @@ class MyApp(ShowBase):
         vectP = self.camera.getPos()
         rad = math.sqrt(vectP[0] ** 2 + vectP[1] ** 2)
         theta = math.atan2(vectP[1], vectP[0]) * 180. / math.pi
+        enemy_fire_text = " OFF" if self.enemy_shooting_suspended else " ON"
         self.textObject.text = str(int(vectH[0] + 180)) + ", " + str(int(rad)) + ", " + str(int(theta)) + ", " \
-                             + str(int(vectH[0] - theta)) + "\nCTRL TANK " + self.human_control_tank_id
+                             + str(int(vectH[0] - theta)) + "\nCTRL TANK " + self.human_control_tank_id + \
+                             "\nENEMY FIRE" + enemy_fire_text + \
+                             "\nBARREL " + str(int(self.player_barrel_tilt))
 
         # mat = Mat4(self.camera.getMat())
         # mat.invertInPlace()
