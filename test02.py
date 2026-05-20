@@ -15,7 +15,7 @@ from direct.showbase.ShowBase import ShowBase
 from direct.task import Task
 
 from panda3d.core import AmbientLight
-from panda3d.core import Vec4, Mat4, Point3, Point4, BitMask32
+from panda3d.core import Vec4, Mat4, Point2, Point3, Point4, BitMask32
 from panda3d.core import LineSegs, NodePath, TransparencyAttrib, ColorBlendAttrib, TextNode, ClockObject, CardMaker
 from panda3d.core import Geom, GeomNode, GeomTriangles, GeomVertexData, GeomVertexFormat, GeomVertexWriter
 from panda3d.core import LVecBase4, LVecBase2d, InputDevice, WindowProperties, Camera, PerspectiveLens
@@ -779,6 +779,7 @@ class MyApp(ShowBase):
         self.render_sight()
         self.render_radar()
         self.render_player_hud()
+        self.render_tank_hud_labels()
         self.render_auxiliary_views()
         self.render_recon_drone()
         self.display_filters = CommonFilters(base.win, base.cam)
@@ -795,6 +796,7 @@ class MyApp(ShowBase):
         self.taskMgr.add(self.updatePlayerFeedbackTask, "UpdatePlayerFeedbackTask")
         self.taskMgr.add(self.updateAuxiliaryViewsTask, "UpdateAuxiliaryViewsTask")
         self.taskMgr.add(self.updateReconDroneTask, "UpdateReconDroneTask")
+        self.taskMgr.add(self.updateTankHudLabelsTask, "UpdateTankHudLabelsTask")
 
         # base.messenger.toggleVerbose()
 
@@ -1523,6 +1525,84 @@ class MyApp(ShowBase):
 
     def update_lives_hud(self):
         self.livesTextObject.text = "LIVES " + " ".join(["|"] * self.player_lives)
+
+    def render_tank_hud_labels(self):
+        self.tank_hud_label_lines = {}
+        self.tank_hud_label_text = {}
+        for t in sorted(tanks_list):
+            line_np = render2d.attachNewNode("Tank{}HudLabelLine".format(t))
+            self.tank_hud_label_lines[t] = line_np
+            color = tanks_dict[t]["color_scale"]
+            label = OnscreenText(text=t, pos=(0, 0), align=TextNode.ACenter,
+                                 scale=(0.04, 0.06),
+                                 fg=(color[0], color[1], color[2], 1), mayChange=True)
+            label.reparentTo(render2d)
+            label.hide()
+            line_np.hide()
+            self.tank_hud_label_text[t] = label
+
+    def hide_tank_hud_label(self, t):
+        self.tank_hud_label_text[t].hide()
+        self.tank_hud_label_lines[t].hide()
+
+    def updateTankHudLabelsTask(self, task):
+        if self.waiting_to_start:
+            for t in tanks_list:
+                self.hide_tank_hud_label(t)
+            return Task.cont
+
+        for t in tanks_list:
+            tank_np = tanks_dict[t]["tank"]
+            if tank_np.isHidden():
+                self.hide_tank_hud_label(t)
+                continue
+
+            target_world = tank_np.getPos(render) + Point3(0, 0, 2.2)
+            camera_space = self.camera.getRelativePoint(render, target_world)
+            projected = Point2()
+            if camera_space[1] <= 0 or not self.camLens.project(camera_space, projected):
+                self.hide_tank_hud_label(t)
+                continue
+
+            target_x = projected[0]
+            target_z = projected[1]
+            if abs(target_x) > 1.08 or abs(target_z) > 1.08:
+                self.hide_tank_hud_label(t)
+                continue
+
+            side = -1 if target_x > 0.72 else 1
+            label_x = max(-0.94, min(0.94, target_x + side * 0.08))
+            label_z = max(-0.82, min(0.62, target_z + 0.09))
+            frame_w = 0.075
+            frame_h = 0.09
+            anchor_x = label_x - side * frame_w * 0.5
+            anchor_z = label_z - frame_h * 0.22
+
+            label = self.tank_hud_label_text[t]
+            label.setPos(label_x, label_z)
+            label.show()
+
+            line_root = self.tank_hud_label_lines[t]
+            line_root.node().removeAllChildren()
+            color = tanks_dict[t]["color_scale"]
+            lines = LineSegs("Tank{}HudLabelBubble".format(t))
+            lines.setThickness(1.6)
+            lines.setColor(color[0], color[1], color[2], 1)
+            x0 = label_x - frame_w * 0.5
+            x1 = label_x + frame_w * 0.5
+            z0 = label_z - frame_h * 0.5
+            z1 = label_z + frame_h * 0.5
+            lines.moveTo(x0, 0, z0)
+            lines.drawTo(x1, 0, z0)
+            lines.drawTo(x1, 0, z1)
+            lines.drawTo(x0, 0, z1)
+            lines.drawTo(x0, 0, z0)
+            lines.moveTo(target_x, 0, target_z)
+            lines.drawTo(anchor_x, 0, anchor_z)
+            line_root.attachNewNode(lines.create())
+            line_root.show()
+
+        return Task.cont
 
     def render_auxiliary_views(self):
         self.auxiliary_cameras = []
