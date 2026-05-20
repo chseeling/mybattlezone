@@ -108,6 +108,8 @@ PLAYER_SHOT_START_Y = 20.0
 PLAYER_SHOT_START_Z = -0.2
 PLAYER_SHOT_BACKTRACE_DISTANCE = 20.0
 PLAYER_SIGHT_MOVES_WITH_BARREL = True
+SHOT_GROUND_BURST_RADIUS = 3.0
+SHOT_GROUND_BURST_SECONDS = 0.22
 INVESTIGATE_WINDOW_SECONDS = 4.0
 INVESTIGATE_FATAL_WINDOW_SECONDS = 999999.0
 INVESTIGATION_GHOST_SPEED = 51.0
@@ -2961,6 +2963,76 @@ class MyApp(ShowBase):
                     }
         return closest_hit
 
+    def find_shot_ground_hit(self, start, end):
+        start = Point3(start)
+        end = Point3(end)
+        direction = end - start
+        previous_t = 0.0
+        previous_height = start[2] - self.terrain_z(start[0], start[1])
+        if previous_height <= 0:
+            return {
+                "t": 0.0,
+                "point": Point3(start[0], start[1], self.terrain_z(start[0], start[1])),
+                "kind": "ground"
+            }
+
+        samples = 80
+        for sample in range(1, samples + 1):
+            t = sample / samples
+            point = start + direction * t
+            height = point[2] - self.terrain_z(point[0], point[1])
+            if height <= 0:
+                low_t = previous_t
+                high_t = t
+                for _ in range(10):
+                    mid_t = (low_t + high_t) * 0.5
+                    mid_point = start + direction * mid_t
+                    mid_height = mid_point[2] - self.terrain_z(mid_point[0], mid_point[1])
+                    if mid_height <= 0:
+                        high_t = mid_t
+                    else:
+                        low_t = mid_t
+                impact_t = high_t
+                impact = start + direction * impact_t
+                return {
+                    "t": impact_t,
+                    "point": Point3(impact[0], impact[1], self.terrain_z(impact[0], impact[1])),
+                    "kind": "ground"
+                }
+            previous_t = t
+            previous_height = height
+
+        return None
+
+    def play_shot_ground_burst(self, impact):
+        burst_lines = LineSegs("shot-ground-burst")
+        burst_lines.setThickness(2)
+        burst_radius = SHOT_GROUND_BURST_RADIUS
+        rays = (
+            (1, 0, 0.22), (-1, 0, 0.22), (0, 1, 0.22), (0, -1, 0.22),
+            (0.7, 0.7, 0.28), (-0.7, 0.7, 0.28), (0.7, -0.7, 0.28), (-0.7, -0.7, 0.28),
+            (0.35, 0, 0.8), (-0.35, 0, 0.8), (0, 0.35, 0.8), (0, -0.35, 0.8)
+        )
+        for ray in rays:
+            end = self.normalize3(Point3(ray[0], ray[1], ray[2])) * burst_radius
+            burst_lines.moveTo(0, 0, 0.08)
+            burst_lines.drawTo(end[0], end[1], end[2])
+
+        burst_np = render.attachNewNode(burst_lines.create())
+        burst_np.setPos(render, Point3(impact))
+        burst_np.setTransparency(TransparencyAttrib.MAlpha, 10)
+        burst_np.setAttrib(ColorBlendAttrib.make(ColorBlendAttrib.MAdd), 10)
+        burst_np.setDepthWrite(False, 10)
+        burst_np.setColorScale(0.1, 1.0, 0.18, 0.95)
+        burst_np.setScale(0.25)
+        Sequence(
+            Parallel(
+                LerpScaleInterval(burst_np, SHOT_GROUND_BURST_SECONDS, 1.0),
+                LerpColorScaleInterval(burst_np, SHOT_GROUND_BURST_SECONDS, (0.0, 0.9, 0.1, 0.0))
+            ),
+            Func(burst_np.removeNode)
+        ).start()
+
     def has_tank_line_of_sight(self, tank_pos, target_pos):
         start = Point3(tank_pos[0], tank_pos[1], tank_pos[2] + 1.5)
         end = Point3(target_pos[0], target_pos[1], target_pos[2])
@@ -3001,6 +3073,21 @@ class MyApp(ShowBase):
         collision_end = Point3(collision_start + shot_dir * collision_distance)
         raw_end = Point3(start + shot_dir * distance)
         hit = self.find_shot_obstacle_hit(collision_start, collision_end)
+        ground_hit = self.find_shot_ground_hit(collision_start, collision_end)
+        if ground_hit and (not hit or ground_hit["t"] < hit["t"]):
+            hit_distance = collision_distance * ground_hit["t"]
+            visible_distance_to_impact = max(0, hit_distance - visible_offset)
+            impact = ground_hit["point"]
+            first_duration = max(0.03, duration * min(1, visible_distance_to_impact / distance))
+            interval = Sequence(
+                LerpPosInterval(round_np, first_duration, pos=impact),
+                Func(self.play_shot_ground_burst, impact),
+                Func(round_np.hide),
+                Wait(SHOT_GROUND_BURST_SECONDS)
+            )
+            interval.setDoneEvent(done_event)
+            return interval, impact, False
+
         if not hit:
             interval = LerpPosInterval(round_np, duration, pos=raw_end)
             interval.setDoneEvent(done_event)
