@@ -87,6 +87,7 @@ PLAYER_HIT_COOLDOWN = 1.2
 PLAYER_FLASH_SECONDS = 0.45
 PLAYER_COLLISION_RADIUS = 1.5
 TANK_COLLISION_RADIUS = 1.6
+AUTONOMOUS_TANK_MAX_SPEED = 9.0
 INVESTIGATE_WINDOW_SECONDS = 4.0
 INVESTIGATE_FATAL_WINDOW_SECONDS = 999999.0
 INVESTIGATION_GHOST_SPEED = 51.0
@@ -2772,7 +2773,7 @@ class MyApp(ShowBase):
             return
 
         if command.desired_world_pos is not None:
-            self.apply_autonomous_tank_command(tank_id, command)
+            self.apply_autonomous_tank_command(tank_id, command, dt)
         else:
             self.apply_direct_tank_command(tank_id, command, dt)
 
@@ -2816,19 +2817,38 @@ class MyApp(ShowBase):
             tanks_dict[t]["last_pos"] = Point3(avoided_world)
             tank_np.setPos(local_pos[0], local_pos[1], 0)
 
-    def apply_autonomous_tank_command(self, t, command):
+    def apply_autonomous_tank_command(self, t, command, dt):
         if command.desired_world_pos is None:
             return
 
         locator = tanks_dict[t]["Locator"]
-        avoided_world = self.resolve_obstacle_position(
+        tank_np = tanks_dict[t]["tank"]
+        target_world = self.resolve_obstacle_position(
             command.desired_world_pos,
+            self.tank_avatars[t].collision_radius
+        )
+        current_world = Point3(tank_np.getPos(render))
+        to_target = target_world - current_world
+        distance = math.sqrt(to_target[0] ** 2 + to_target[1] ** 2)
+        max_step = AUTONOMOUS_TANK_MAX_SPEED * dt
+
+        if distance > max_step and distance > 0.001:
+            candidate_world = Point3(
+                current_world[0] + to_target[0] / distance * max_step,
+                current_world[1] + to_target[1] / distance * max_step,
+                current_world[2]
+            )
+        else:
+            candidate_world = Point3(target_world)
+
+        avoided_world = self.resolve_obstacle_position(
+            candidate_world,
             self.tank_avatars[t].collision_radius
         )
         local_pos = locator.getRelativePoint(render, avoided_world)
         heading = command.desired_heading
 
-        previous_world = tanks_dict[t].get("last_pos", command.desired_world_pos)
+        previous_world = tanks_dict[t].get("last_pos", current_world)
         move_dx = avoided_world[0] - previous_world[0]
         move_dy = avoided_world[1] - previous_world[1]
         if abs(move_dx) + abs(move_dy) > 0.001:
