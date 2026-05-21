@@ -1205,6 +1205,8 @@ class MyApp(ShowBase):
             tanks_dict[t]["round"].setScale(0.14, 0.14, 0.14)
             tanks_dict[t]["round"].reparentTo(tanks_dict[t]["tank"])
 
+        self.setup_tank_runtime_states()
+
         #
         # new mountain method
         self.render_mountains()
@@ -1524,6 +1526,107 @@ class MyApp(ShowBase):
     def hpr_to_list(self, hpr):
         return [float(hpr[0]), float(hpr[1]), float(hpr[2])]
 
+    def setup_tank_runtime_states(self):
+        self.tank_runtime = {
+            "0": {
+                "body": self.player_tank_visual,
+                "control": self.camera,
+                "shot": self.tank_round[0],
+                "is_player": True
+            }
+        }
+        for t in tanks_list:
+            self.tank_runtime[t] = {
+                "body": tanks_dict[t]["tank"],
+                "control": tanks_dict[t]["tank"],
+                "shot": tanks_dict[t]["round"],
+                "locator": tanks_dict[t]["Locator"],
+                "is_player": False
+            }
+
+    def tank_runtime_state(self, tank_id):
+        return self.tank_runtime[tank_id]
+
+    def tank_body_node(self, tank_id):
+        return self.tank_runtime_state(tank_id)["body"]
+
+    def tank_control_node(self, tank_id):
+        return self.tank_runtime_state(tank_id)["control"]
+
+    def tank_shot_node(self, tank_id):
+        return self.tank_runtime_state(tank_id)["shot"]
+
+    def tank_is_shooting(self, tank_id):
+        if tank_id == "0":
+            return self.player_shot_interval is not None
+        return tanks_dict[tank_id]["shooting"]
+
+    def set_tank_shooting(self, tank_id, shooting):
+        if tank_id != "0":
+            tanks_dict[tank_id]["shooting"] = shooting
+
+    def tank_shot_interval(self, tank_id):
+        if tank_id == "0":
+            return self.player_shot_interval
+        return tanks_dict[tank_id].get("shot_interval")
+
+    def set_tank_shot_interval(self, tank_id, interval):
+        if tank_id == "0":
+            self.player_shot_interval = interval
+        else:
+            tanks_dict[tank_id]["shot_interval"] = interval
+
+    def tank_shot_deflected(self, tank_id):
+        if tank_id == "0":
+            return self.player_shot_deflected
+        return tanks_dict[tank_id].get("shot_deflected", False)
+
+    def set_tank_shot_deflected(self, tank_id, shot_deflected):
+        if tank_id == "0":
+            self.player_shot_deflected = shot_deflected
+        else:
+            tanks_dict[tank_id]["shot_deflected"] = shot_deflected
+
+    def tank_shot_done_event(self, tank_id):
+        if tank_id == "0":
+            return "shot-done"
+        return "shot{}-done".format(tank_id)
+
+    def tank_shot_start(self, tank_id):
+        if tank_id == "0":
+            return Point3(self.tank_shot_node("0").getPos(render))
+        return Point3(self.tank_shot_node(tank_id).getPos(render))
+
+    def record_tank_shot_metadata(self, tank_id, shot_start, shot_end):
+        if tank_id == "0":
+            return
+        tanks_dict[tank_id]["shot_start"] = Point3(shot_start)
+        tanks_dict[tank_id]["shot_end"] = Point3(shot_end)
+        tanks_dict[tank_id]["shot_shooter_pos"] = Point3(self.tank_body_node(tank_id).getPos(render))
+        tanks_dict[tank_id]["shot_shooter_hpr"] = self.tank_body_node(tank_id).getHpr(render)
+
+    def tank_ids_for_state(self):
+        return ["0"] + sorted(tanks_list)
+
+    def tank_snapshot_state(self, tank_id):
+        body_np = self.tank_body_node(tank_id)
+        return {
+            "pos": self.point_to_list(body_np.getPos(render)),
+            "hpr": self.hpr_to_list(body_np.getHpr(render)),
+            "barrel_tilt": self.tank_barrel_tilt(tank_id),
+            "hidden": body_np.isHidden(),
+            "shooting": self.tank_is_shooting(tank_id)
+        }
+
+    def tank_shot_snapshot_state(self, tank_id):
+        shot_np = self.tank_shot_node(tank_id)
+        return {
+            "pos": self.point_to_list(shot_np.getPos(render)),
+            "hpr": self.hpr_to_list(shot_np.getHpr(render)),
+            "hidden": shot_np.isHidden(),
+            "shooting": self.tank_is_shooting(tank_id)
+        }
+
     def update_player_tank_visual(self):
         if not hasattr(self, "player_tank_visual"):
             return
@@ -1571,36 +1674,9 @@ class MyApp(ShowBase):
             "shots": {}
         }
 
-        snapshot["tanks"]["0"] = {
-            "pos": self.point_to_list(self.player_tank_visual.getPos(render)),
-            "hpr": self.hpr_to_list(self.player_tank_visual.getHpr(render)),
-            "barrel_tilt": self.tank_barrel_tilt("0"),
-            "hidden": False,
-            "shooting": self.player_shot_interval is not None
-        }
-        snapshot["shots"]["0"] = {
-            "pos": self.point_to_list(self.tank_round[0].getPos(render)),
-            "hpr": self.hpr_to_list(self.tank_round[0].getHpr(render)),
-            "hidden": self.tank_round[0].isHidden(),
-            "shooting": self.player_shot_interval is not None
-        }
-
-        for t in tanks_list:
-            tank_np = tanks_dict[t]["tank"]
-            round_np = tanks_dict[t]["round"]
-            snapshot["tanks"][t] = {
-                "pos": self.point_to_list(tank_np.getPos(render)),
-                "hpr": self.hpr_to_list(tank_np.getHpr(render)),
-                "barrel_tilt": self.tank_barrel_tilt(t),
-                "hidden": tank_np.isHidden(),
-                "shooting": tanks_dict[t]["shooting"]
-            }
-            snapshot["shots"][t] = {
-                "pos": self.point_to_list(round_np.getPos(render)),
-                "hpr": self.hpr_to_list(round_np.getHpr(render)),
-                "hidden": round_np.isHidden(),
-                "shooting": tanks_dict[t]["shooting"]
-            }
+        for tank_id in self.tank_ids_for_state():
+            snapshot["tanks"][tank_id] = self.tank_snapshot_state(tank_id)
+            snapshot["shots"][tank_id] = self.tank_shot_snapshot_state(tank_id)
 
         return snapshot
 
@@ -1741,39 +1817,58 @@ class MyApp(ShowBase):
         node.setPos(render, self.snapshot_state_point(state, "pos"))
         node.setHpr(render, *self.snapshot_state_hpr(state))
 
+    def set_tank_body_visibility_from_snapshot(self, tank_id, state):
+        body_np = self.tank_body_node(tank_id)
+        if state.get("hidden", False):
+            body_np.hide()
+            return
+
+        body_np.show()
+        if tank_id == "0":
+            if getattr(self, "player_tank_visual_hidden_for_effect", False):
+                body_np.hide()
+            elif self.is_network_client_controller():
+                body_np.show(MAIN_CAMERA_MASK)
+            else:
+                body_np.hide(MAIN_CAMERA_MASK)
+            return
+
+        if tank_id == NETWORK_TANK_ID:
+            body_np.hide(MAIN_CAMERA_MASK)
+        else:
+            body_np.show(MAIN_CAMERA_MASK)
+
+    def set_tank_shot_visibility_from_snapshot(self, tank_id, state):
+        shot_np = self.tank_shot_node(tank_id)
+        if state.get("hidden", True):
+            shot_np.hide()
+        else:
+            shot_np.show()
+
+    def set_tank_body_from_snapshot(self, tank_id, state):
+        self.set_node_to_snapshot(self.tank_body_node(tank_id), state)
+
+    def set_tank_shot_from_snapshot(self, tank_id, state):
+        shot_np = self.tank_shot_node(tank_id)
+        shot_np.wrtReparentTo(render)
+        self.set_node_to_snapshot(shot_np, state)
+
     def update_network_snapshot_visibility(self, targets=None):
         targets = targets or self.network_snapshot_targets
         tank_states = targets.get("tanks", {})
-        player_state = tank_states.get("0")
-        if player_state and hasattr(self, "player_tank_visual"):
-            if player_state.get("hidden", False) or getattr(self, "player_tank_visual_hidden_for_effect", False):
-                self.player_tank_visual.hide()
-            else:
-                self.player_tank_visual.show()
-                self.player_tank_visual.show(MAIN_CAMERA_MASK)
 
-        for t in tanks_list:
-            state = tank_states.get(t)
+        for tank_id in self.tank_ids_for_state():
+            state = tank_states.get(tank_id)
             if not state:
                 continue
-            tank_np = tanks_dict[t]["tank"]
-            if state.get("hidden", False):
-                tank_np.hide()
-            else:
-                tank_np.show()
-            if t == NETWORK_TANK_ID:
-                tank_np.hide(MAIN_CAMERA_MASK)
-            else:
-                tank_np.show(MAIN_CAMERA_MASK)
+            self.set_tank_body_visibility_from_snapshot(tank_id, state)
 
         shot_states = targets.get("shots", {})
-        if "0" in shot_states:
-            self.tank_round[0].hide() if shot_states["0"].get("hidden", True) else self.tank_round[0].show()
-        for t in tanks_list:
-            state = shot_states.get(t)
+        for tank_id in self.tank_ids_for_state():
+            state = shot_states.get(tank_id)
             if not state:
                 continue
-            tanks_dict[t]["round"].hide() if state.get("hidden", True) else tanks_dict[t]["round"].show()
+            self.set_tank_shot_visibility_from_snapshot(tank_id, state)
 
     def snap_network_snapshot_render(self):
         tank_states = self.network_snapshot_targets.get("tanks", {})
@@ -1783,29 +1878,16 @@ class MyApp(ShowBase):
             self.camera.setHpr(render, *self.snapshot_state_hpr(view_state))
             self.player_barrel_tilt = float(view_state.get("barrel_tilt", 0.0))
 
-        player_state = tank_states.get("0")
-        if player_state and hasattr(self, "player_tank_visual"):
-            self.player_tank_visual.setPos(render, self.snapshot_state_point(player_state, "pos"))
-            self.player_tank_visual.setHpr(render, *self.snapshot_state_hpr(player_state))
-
-        for t in tanks_list:
-            state = tank_states.get(t)
+        for tank_id in self.tank_ids_for_state():
+            state = tank_states.get(tank_id)
             if state:
-                tanks_dict[t]["tank"].setPos(render, self.snapshot_state_point(state, "pos"))
-                tanks_dict[t]["tank"].setHpr(render, *self.snapshot_state_hpr(state))
+                self.set_tank_body_from_snapshot(tank_id, state)
 
         shot_states = self.network_snapshot_targets.get("shots", {})
-        if "0" in shot_states:
-            self.tank_round[0].wrtReparentTo(render)
-            self.tank_round[0].setPos(render, self.snapshot_state_point(shot_states["0"], "pos"))
-            self.tank_round[0].setHpr(render, *self.snapshot_state_hpr(shot_states["0"]))
-        for t in tanks_list:
-            state = shot_states.get(t)
+        for tank_id in self.tank_ids_for_state():
+            state = shot_states.get(tank_id)
             if state:
-                round_np = tanks_dict[t]["round"]
-                round_np.wrtReparentTo(render)
-                round_np.setPos(render, self.snapshot_state_point(state, "pos"))
-                round_np.setHpr(render, *self.snapshot_state_hpr(state))
+                self.set_tank_shot_from_snapshot(tank_id, state)
 
     def update_network_snapshot_render(self, dt):
         targets = self.interpolated_network_snapshot_targets()
@@ -1817,25 +1899,16 @@ class MyApp(ShowBase):
             self.set_node_to_snapshot(self.camera, view_state)
             self.player_barrel_tilt = float(view_state.get("barrel_tilt", 0.0))
 
-        player_state = tank_states.get("0")
-        if player_state and hasattr(self, "player_tank_visual"):
-            self.set_node_to_snapshot(self.player_tank_visual, player_state)
-
-        for t in tanks_list:
-            state = tank_states.get(t)
+        for tank_id in self.tank_ids_for_state():
+            state = tank_states.get(tank_id)
             if state:
-                self.set_node_to_snapshot(tanks_dict[t]["tank"], state)
+                self.set_tank_body_from_snapshot(tank_id, state)
 
         shot_states = targets.get("shots", {})
-        if "0" in shot_states:
-            self.tank_round[0].wrtReparentTo(render)
-            self.set_node_to_snapshot(self.tank_round[0], shot_states["0"])
-        for t in tanks_list:
-            state = shot_states.get(t)
+        for tank_id in self.tank_ids_for_state():
+            state = shot_states.get(tank_id)
             if state:
-                round_np = tanks_dict[t]["round"]
-                round_np.wrtReparentTo(render)
-                self.set_node_to_snapshot(round_np, state)
+                self.set_tank_shot_from_snapshot(tank_id, state)
 
         self.update_barrel_aim_marker()
 
@@ -1952,9 +2025,9 @@ class MyApp(ShowBase):
 
     def pause_simulation_intervals(self):
         self.investigation_paused_intervals = []
-        self.pause_interval_for_investigation(self.player_shot_interval)
+        self.pause_interval_for_investigation(self.tank_shot_interval("0"))
         for t in tanks_list:
-            self.pause_interval_for_investigation(tanks_dict[t].get("shot_interval"))
+            self.pause_interval_for_investigation(self.tank_shot_interval(t))
             self.pause_interval_for_investigation(tanks_dict[t].get("explosion"))
 
     def resume_simulation_intervals(self):
@@ -2191,13 +2264,13 @@ class MyApp(ShowBase):
             return
 
         shooter_id = from_name[-1]
-        if tanks_dict[shooter_id].get("shot_deflected", False):
+        if self.tank_shot_deflected(shooter_id):
             return
-        shot_start = tanks_dict[shooter_id].get("shot_start", tanks_dict[shooter_id]["round"].getPos(render))
+        shot_start = tanks_dict[shooter_id].get("shot_start", self.tank_shot_node(shooter_id).getPos(render))
         try:
             shot_end = entry.getSurfacePoint(render)
         except Exception:
-            shot_end = tanks_dict[shooter_id]["round"].getPos(render)
+            shot_end = self.tank_shot_node(shooter_id).getPos(render)
         shot_end = Point3(shot_end)
         if not self.enemy_hit_is_low_enough_for_player_tank(shot_end):
             return
@@ -2227,7 +2300,7 @@ class MyApp(ShowBase):
             return
         if shooter_id not in tanks_list:
             return
-        if tanks_dict[shooter_id].get("shot_deflected", False):
+        if self.tank_shot_deflected(shooter_id):
             return
 
         shot_end = Point3(shot_end)
@@ -4023,13 +4096,15 @@ class MyApp(ShowBase):
             "line_of_sight": line_of_sight,
             "line_of_sight_clear_fraction": line_of_sight_clear_fraction,
             "risky_line_of_sight": line_of_sight_clear_fraction >= TACTICAL_AI_RISKY_SHOT_CLEAR_FRACTION,
-            "is_shooting": tanks_dict[tank_id]["shooting"],
+            "is_shooting": self.tank_is_shooting(tank_id),
         }
 
-    def create_shot_interval(self, round_np, start, direction, distance, duration, done_event, collision_start=None):
+    def create_shot_interval(self, round_np, start, direction, distance, duration, done_event, collision_start=None, shooter_id=None):
         shot_dir = self.normalize3(direction)
         if collision_start is None:
             collision_start = start
+        if shooter_id is None:
+            shooter_id = "0" if done_event == 'shot-done' else done_event[4:5]
         collision_start = Point3(collision_start)
         visible_offset = max(0, self.dot3(start - collision_start, shot_dir))
         collision_distance = visible_offset + distance
@@ -4042,17 +4117,14 @@ class MyApp(ShowBase):
             collision_start,
             collision_end,
             minimum_hit_t
-        ) if done_event == 'shot-done' else None
+        ) if shooter_id == "0" else None
         incoming_player_hit = None
-        incoming_shooter_id = None
-        if done_event.startswith("shot") and done_event != 'shot-done':
-            incoming_shooter_id = done_event[4:5]
-            if incoming_shooter_id in tanks_list:
-                incoming_player_hit = self.find_incoming_player_tank_hit(
-                    collision_start,
-                    collision_end,
-                    minimum_hit_t
-                )
+        if shooter_id in tanks_list:
+            incoming_player_hit = self.find_incoming_player_tank_hit(
+                collision_start,
+                collision_end,
+                minimum_hit_t
+            )
 
         if tank_hit and (not hit or tank_hit["t"] < hit["t"]) and (not ground_hit or tank_hit["t"] < ground_hit["t"]):
             hit_distance = collision_distance * tank_hit["t"]
@@ -4076,7 +4148,7 @@ class MyApp(ShowBase):
             first_duration = max(0.03, duration * min(1, visible_distance_to_impact / distance))
             interval = Sequence(
                 LerpPosInterval(round_np, first_duration, pos=impact),
-                Func(self.register_incoming_player_tank_hit, incoming_shooter_id, start, impact)
+                Func(self.register_incoming_player_tank_hit, shooter_id, start, impact)
             )
             interval.setDoneEvent(done_event)
             return interval, impact, False
@@ -4139,13 +4211,13 @@ class MyApp(ShowBase):
 
         from_name = entry.getFromNodePath().node().name
         if from_name == "cTankRound":
-            if self.player_shot_deflected:
+            if self.tank_shot_deflected("0"):
                 return
             self.reset_shot()
         elif from_name.startswith("ceTankRound"):
             t = from_name[-1]
             if t in tanks_list:
-                if tanks_dict[t].get("shot_deflected", False):
+                if self.tank_shot_deflected(t):
                     return
                 self.enemy_reset_shot(t)
 
@@ -4204,7 +4276,7 @@ class MyApp(ShowBase):
         if (
                 command.fire and
                 self.tank_attack_ready(tank_id, task_time) and
-                not tanks_dict[tank_id]["shooting"]):
+                not self.tank_is_shooting(tank_id)):
             if remote_controlled:
                 self.fire_remote_tank(tank_id)
             elif not self.enemy_shooting_suspended:
@@ -4369,81 +4441,92 @@ class MyApp(ShowBase):
         tanks_dict[t]["tank"].setPos(local_pos)
         tanks_dict[t]["tank"].setHpr(render, *self.terrain_surface_hpr(surface_world[0], surface_world[1], heading, "x"))
 
+    def prepare_tank_shot(self, tank_id):
+        shot_np = self.tank_shot_node(tank_id)
+        if tank_id == "0":
+            shot_np.setPos(0, PLAYER_SHOT_START_Y, PLAYER_SHOT_START_Z)
+            self.sight_engaged_np.show()
+            self.sight_clear_np.hide()
+        else:
+            self.set_tank_shooting(tank_id, True)
+
+        shot_np.wrtReparentTo(render)
+        shot_np.show()
+        return Point3(shot_np.getPos(render))
+
+    def complete_tank_shot_start(self, tank_id, shot_start, interval, shot_end, shot_deflected):
+        self.set_tank_shot_interval(tank_id, interval)
+        self.set_tank_shot_deflected(tank_id, shot_deflected)
+        self.record_tank_shot_metadata(tank_id, shot_start, shot_end)
+        interval.start()
+
+    def fire_tank_shot(self, tank_id, direction, distance, duration, sound, collision_start=None, shot_start=None):
+        if shot_start is None:
+            shot_start = self.prepare_tank_shot(tank_id)
+        interval, shot_end, shot_deflected = self.create_shot_interval(
+            self.tank_shot_node(tank_id),
+            shot_start,
+            direction,
+            distance,
+            duration,
+            self.tank_shot_done_event(tank_id),
+            collision_start,
+            shooter_id=tank_id
+        )
+        self.complete_tank_shot_start(tank_id, shot_start, interval, shot_end, shot_deflected)
+        sound.play()
+        return shot_end
+
     def fire_enemy_tank(self, t):
         print('Tank {} shooting'.format(t))
-        tanks_dict[t]["shooting"] = True
-        tanks_dict[t]["round"].wrtReparentTo(render)
-        tanks_dict[t]["round"].show()
-        shot_start = Point3(tanks_dict[t]["round"].getPos(render))
-        shoot_at = self.enemy_shot_direction(t, shot_start)
-        shot_end = shot_start + shoot_at * 300
-        tanks_dict[t]["shot_start"] = shot_start
-        tanks_dict[t]["shot_shooter_pos"] = Point3(tanks_dict[t]["tank"].getPos(render))
-        tanks_dict[t]["shot_shooter_hpr"] = tanks_dict[t]["tank"].getHpr(render)
-        i, shot_end, shot_deflected = self.create_shot_interval(
-            tanks_dict[t]["round"],
-            shot_start,
-            shoot_at,
+        shot_start = self.prepare_tank_shot(t)
+        self.fire_tank_shot(
+            t,
+            self.enemy_shot_direction(t, shot_start),
             300,
             1,
-            'shot{}-done'.format(t)
+            self.enemyShot_snd,
+            shot_start=shot_start
         )
-        tanks_dict[t]["shot_end"] = Point3(shot_end)
-        tanks_dict[t]["shot_deflected"] = shot_deflected
-        tanks_dict[t]["shot_interval"] = i
-        i.start()
-        self.enemyShot_snd.play()
 
     def fire_remote_tank(self, t):
         print('Remote tank {} shooting'.format(t))
-        tanks_dict[t]["shooting"] = True
-        tanks_dict[t]["round"].wrtReparentTo(render)
-        tanks_dict[t]["round"].show()
-        shot_start = Point3(tanks_dict[t]["round"].getPos(render))
-        shoot_at = self.tank_shot_direction(t, shot_start)
-        shot_end = shot_start + shoot_at * 300
-        tanks_dict[t]["shot_start"] = shot_start
-        tanks_dict[t]["shot_shooter_pos"] = Point3(tanks_dict[t]["tank"].getPos(render))
-        tanks_dict[t]["shot_shooter_hpr"] = tanks_dict[t]["tank"].getHpr(render)
-        i, shot_end, shot_deflected = self.create_shot_interval(
-            tanks_dict[t]["round"],
-            shot_start,
-            shoot_at,
+        shot_start = self.prepare_tank_shot(t)
+        self.fire_tank_shot(
+            t,
+            self.tank_shot_direction(t, shot_start),
             300,
             1,
-            'shot{}-done'.format(t)
+            self.mainShot_snd,
+            shot_start=shot_start
         )
-        tanks_dict[t]["shot_end"] = Point3(shot_end)
-        tanks_dict[t]["shot_deflected"] = shot_deflected
-        tanks_dict[t]["shot_interval"] = i
-        i.start()
-        self.mainShot_snd.play()
 
-    def reset_shot(self):
-        # print('reset_shot')
-        if self.player_shot_interval:
-            if self.player_shot_interval.isPlaying():
-                self.player_shot_interval.pause()
-            self.player_shot_interval = None
-        self.player_shot_deflected = False
-        self.tank_round[0].hide()
-        self.tank_round[0].reparentTo(self.camera)
-        self.tank_round[0].setPos(0, PLAYER_SHOT_START_Y, PLAYER_SHOT_START_Z - 10)
-        self.tank_round[0].setHpr(0, 90, 0)
-
-    def enemy_reset_shot(self, t):
-        # print("reset shot {}".format(t))
-        shot_interval = tanks_dict[t].get("shot_interval")
+    def reset_tank_shot(self, tank_id):
+        shot_interval = self.tank_shot_interval(tank_id)
         if shot_interval:
             if shot_interval.isPlaying():
                 shot_interval.pause()
-            tanks_dict[t]["shot_interval"] = None
-        tanks_dict[t]["shot_deflected"] = False
-        tanks_dict[t]["round"].reparentTo(tanks_dict[t]["tank"])
-        tanks_dict[t]["round"].setPos(-0.4, 0, 1.61325)
-        tanks_dict[t]["round"].setHpr(0, 0, 90)
-        tanks_dict[t]["round"].show()
-        tanks_dict[t]["shooting"] = False
+            self.set_tank_shot_interval(tank_id, None)
+
+        self.set_tank_shot_deflected(tank_id, False)
+        shot_np = self.tank_shot_node(tank_id)
+        if tank_id == "0":
+            shot_np.hide()
+            shot_np.reparentTo(self.camera)
+            shot_np.setPos(0, PLAYER_SHOT_START_Y, PLAYER_SHOT_START_Z - 10)
+            shot_np.setHpr(0, 90, 0)
+        else:
+            shot_np.reparentTo(self.tank_body_node(tank_id))
+            shot_np.setPos(-0.4, 0, 1.61325)
+            shot_np.setHpr(0, 0, 90)
+            shot_np.show()
+            self.set_tank_shooting(tank_id, False)
+
+    def reset_shot(self):
+        self.reset_tank_shot("0")
+
+    def enemy_reset_shot(self, t):
+        self.reset_tank_shot(t)
 
     def request_player_fire(self):
         if self.is_network_client_controller():
@@ -4456,7 +4539,7 @@ class MyApp(ShowBase):
         if self.game_over or self.investigation_mode:
             return
 
-        if self.player_shot_interval is not None:
+        if self.tank_shot_interval("0") is not None:
             return
 
         self.human_tank_controller.request_fire()
@@ -4481,35 +4564,21 @@ class MyApp(ShowBase):
         if self.game_over or self.investigation_mode:
             return
 
-        if self.player_shot_interval is not None:
+        if self.tank_shot_interval("0") is not None:
             return
 
-        self.tank_round[0].setPos(0, PLAYER_SHOT_START_Y, PLAYER_SHOT_START_Z)
-        self.sight_engaged_np.show()
-        self.sight_clear_np.hide()
-
-        self.tank_round[0].wrtReparentTo(render)
-        # print(self.tank_round[0].getPos(), self.tank_round[0].getHpr())
-        shot_start = Point3(self.tank_round[0].getPos(render))
-        ShootAt = self.player_shot_direction(shot_start)
-        # self.tank_round[0].setPos(self.tank_round[0].getPos() + ShootAt)
-
-        self.tank_round[0].show()
-        self.mainShot_snd.play()
-        collision_start = Point3(shot_start - ShootAt * PLAYER_SHOT_BACKTRACE_DISTANCE)
-        i, shot_end, shot_deflected = self.create_shot_interval(
-            self.tank_round[0],
-            shot_start,
-            ShootAt,
+        shot_start = self.prepare_tank_shot("0")
+        shoot_at = self.player_shot_direction(shot_start)
+        collision_start = Point3(shot_start - shoot_at * PLAYER_SHOT_BACKTRACE_DISTANCE)
+        self.fire_tank_shot(
+            "0",
+            shoot_at,
             200,
             1.1,
-            'shot-done',
-            collision_start
+            self.mainShot_snd,
+            collision_start,
+            shot_start
         )
-        self.player_shot_interval = i
-        self.player_shot_deflected = shot_deflected
-        i.start()
-        # print(ShootAt)
         return
 
     def tank0_round_hit(self, entry):
@@ -4517,7 +4586,7 @@ class MyApp(ShowBase):
             return
 
         if entry.getIntoNodePath().node().name[:5] == 'cTank':
-            if self.player_shot_deflected:
+            if self.tank_shot_deflected("0"):
                 return
             t = entry.getIntoNodePath().node().name[5:6]
             self.register_player_tank_hit(t)
