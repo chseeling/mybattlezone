@@ -51,6 +51,7 @@ tank-client-1
 - Broadcast snapshots to every connected client.
 - Add simple join/leave status before introducing lobbies.
 - Expire clients that stop sending input/presence packets so stale local test windows do not remain connected.
+- Clients send `join` packets before input; the server replies with `join_ack` accepted/rejected state for the requested tank.
 
 ## Milestone 4: Publishable Transport
 
@@ -70,6 +71,7 @@ Useful environment variables:
 - `BATTLEZONE_NET_PORT`: UDP port, default `51515`.
 - `BATTLEZONE_NET_TANK`: controlled tank id, default `1`.
 - Client presence timeout is currently `2.5` seconds.
+- Client join requests are sent once per second until accepted.
 - `BATTLEZONE_NET_CLIENT_LOW_RENDER`: client-only lighter render mode, default `1`.
 - `BATTLEZONE_NET_SERVER_LOW_RENDER`: server-only lighter render mode, default `1`.
 - `BATTLEZONE_AUDIO_FOCUS_MUTE`: mute this process when its window is not focused, default `1`.

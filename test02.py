@@ -96,7 +96,9 @@ NETWORK_MODE_LABEL = "server" if os.environ.get("BATTLEZONE_NET_MODE", "").lower
 NETWORK_HOST = os.environ.get("BATTLEZONE_NET_HOST", "127.0.0.1")
 NETWORK_PORT = int(os.environ.get("BATTLEZONE_NET_PORT", "51515"))
 NETWORK_TANK_ID = os.environ.get("BATTLEZONE_NET_TANK", "1")
+NETWORK_PROTOCOL_VERSION = 1
 NETWORK_SEND_RATE = 30.0
+NETWORK_JOIN_RATE = 1.0
 NETWORK_SNAPSHOT_RATE = 25.0
 NETWORK_SMOOTHING_RATE = 14.0
 NETWORK_RENDER_DELAY = 0.08
@@ -775,6 +777,10 @@ class UdpTankInputBridge:
         self.client_addr = None
         self.client_addrs = {}
         self.client_last_seen = {}
+        self.client_join_status = {}
+        self.join_accepted = False
+        self.join_rejected_reason = ""
+        self.last_join_send_time = -999
         self.last_send_time = 0
         self.last_snapshot_time = 0
         self.last_fire_down = False
@@ -796,7 +802,13 @@ class UdpTankInputBridge:
             peer = ",".join(connected) if connected else "WAIT"
             return "NET SERVER {}".format(peer)
         if self.mode == "client":
-            return "NET CLIENT {}".format(self.tank_id)
+            if self.join_accepted:
+                state = "ACCEPTED"
+            elif self.join_rejected_reason:
+                state = "REJECTED"
+            else:
+                state = "JOINING"
+            return "NET CLIENT {} {}".format(self.tank_id, state)
         return ""
 
     def connected_tank_ids(self):
@@ -809,6 +821,7 @@ class UdpTankInputBridge:
             self.send_host_snapshot(task_time)
         elif self.mode == "client":
             self.receive_client_packets(task_time)
+            self.send_client_join(task_time)
             self.send_client_input(task_time)
 
     def receive_host_packets(self, task_time):
@@ -823,16 +836,20 @@ class UdpTankInputBridge:
             except (UnicodeDecodeError, ValueError):
                 continue
 
-            if message.get("type") != "input":
+            message_type = message.get("type")
+            if message_type == "join":
+                self.handle_host_join(message, addr, task_time)
+                continue
+
+            if message_type != "input":
                 continue
 
             tank_id = str(message.get("tank_id", self.tank_id))
             if tank_id not in network_tank_ids():
                 continue
+            if not self.accept_host_client_claim(tank_id, addr, task_time):
+                continue
 
-            self.client_addr = addr
-            self.client_addrs[tank_id] = addr
-            self.client_last_seen[tank_id] = task_time
             self.last_packet_time = task_time
             self.last_packet_count += 1
             self.app.submit_remote_tank_input(
@@ -842,6 +859,40 @@ class UdpTankInputBridge:
                 fire=bool(message.get("fire", False)),
                 barrel_tilt=float(message.get("barrel_tilt", 0.0))
             )
+
+    def handle_host_join(self, message, addr, task_time):
+        tank_id = str(message.get("tank_id", self.tank_id))
+        if tank_id not in network_tank_ids():
+            self.send_host_join_ack(addr, tank_id, False, "invalid tank")
+            return
+
+        if not self.accept_host_client_claim(tank_id, addr, task_time):
+            self.send_host_join_ack(addr, tank_id, False, "tank already claimed")
+            return
+
+        self.send_host_join_ack(addr, tank_id, True, "")
+
+    def accept_host_client_claim(self, tank_id, addr, task_time):
+        existing_addr = self.client_addrs.get(tank_id)
+        if existing_addr is not None and existing_addr != addr:
+            return False
+
+        self.client_addr = addr
+        self.client_addrs[tank_id] = addr
+        self.client_last_seen[tank_id] = task_time
+        self.client_join_status[tank_id] = "accepted"
+        return True
+
+    def send_host_join_ack(self, addr, tank_id, accepted, reason):
+        payload = {
+            "type": "join_ack",
+            "protocol": NETWORK_PROTOCOL_VERSION,
+            "tank_id": tank_id,
+            "accepted": bool(accepted),
+            "reason": reason,
+            "connected_tanks": self.connected_tank_ids()
+        }
+        self.socket.sendto(json.dumps(payload).encode("utf-8"), addr)
 
     def send_host_snapshot(self, task_time):
         if not self.client_addrs:
@@ -861,6 +912,7 @@ class UdpTankInputBridge:
         for tank_id in stale_tanks:
             self.client_addrs.pop(tank_id, None)
             self.client_last_seen.pop(tank_id, None)
+            self.client_join_status.pop(tank_id, None)
 
     def expire_host_clients(self, task_time):
         stale_tanks = [
@@ -871,6 +923,7 @@ class UdpTankInputBridge:
         for tank_id in stale_tanks:
             self.client_addrs.pop(tank_id, None)
             self.client_last_seen.pop(tank_id, None)
+            self.client_join_status.pop(tank_id, None)
 
     def receive_client_packets(self, task_time):
         while True:
@@ -884,14 +937,46 @@ class UdpTankInputBridge:
             except (UnicodeDecodeError, ValueError):
                 continue
 
-            if message.get("type") != "snapshot":
+            message_type = message.get("type")
+            if message_type == "join_ack":
+                self.handle_client_join_ack(message)
+                continue
+
+            if message_type != "snapshot":
                 continue
 
             self.last_packet_time = task_time
             self.last_packet_count += 1
             self.app.apply_network_snapshot(message)
 
+    def handle_client_join_ack(self, message):
+        if str(message.get("tank_id", self.tank_id)) != self.tank_id:
+            return
+        self.join_accepted = bool(message.get("accepted", False))
+        self.join_rejected_reason = "" if self.join_accepted else str(message.get("reason", "join rejected"))
+        self.app.network_join_accepted = self.join_accepted
+        self.app.network_join_rejected_reason = self.join_rejected_reason
+        self.app.network_connected_tanks = message.get("connected_tanks", [])
+        if self.app.is_network_client_controller():
+            self.app.update_network_client_presentation()
+
+    def send_client_join(self, task_time):
+        if self.join_accepted:
+            return
+        if task_time - self.last_join_send_time < 1.0 / NETWORK_JOIN_RATE:
+            return
+        self.last_join_send_time = task_time
+
+        payload = {
+            "type": "join",
+            "protocol": NETWORK_PROTOCOL_VERSION,
+            "tank_id": self.tank_id
+        }
+        self.socket.sendto(json.dumps(payload).encode("utf-8"), self.server_addr)
+
     def send_client_input(self, task_time):
+        if not self.join_accepted:
+            return
         if task_time - self.last_send_time < 1.0 / NETWORK_SEND_RATE:
             return
         self.last_send_time = task_time
@@ -1474,6 +1559,8 @@ class MyApp(ShowBase):
         self.network_snapshot_targets = {"tanks": {}, "shots": {}}
         self.network_snapshot_history = []
         self.network_connected_tanks = []
+        self.network_join_accepted = False
+        self.network_join_rejected_reason = ""
         if NETWORK_MODE not in {"host", "client"}:
             return
 
@@ -1523,6 +1610,10 @@ class MyApp(ShowBase):
         return self.is_network_server_authority() and NETWORK_SERVER_LOW_RENDER
 
     def network_client_mode_label(self):
+        if self.network_join_rejected_reason:
+            return "JOIN REJECTED"
+        if not self.network_join_accepted:
+            return "JOINING"
         if self.is_network_client_low_render():
             return "LOW RENDER MODE"
         return "WATCH HOST WINDOW"
@@ -1555,10 +1646,10 @@ class MyApp(ShowBase):
             return
 
         self.waiting_to_start = True
-        self.startTextObject.text = "REMOTE CONTROLLER\nTANK {}\n{}".format(
-            NETWORK_TANK_ID,
-            self.network_client_mode_label()
-        )
+        detail = self.network_client_mode_label()
+        if self.network_join_rejected_reason:
+            detail = self.network_join_rejected_reason.upper()
+        self.startTextObject.text = "REMOTE CONTROLLER\nTANK {}\n{}".format(NETWORK_TANK_ID, detail)
         self.startTextObject.show()
         for text_object in getattr(self, "environmentNameTextObjects", []):
             text_object.hide()
@@ -2007,6 +2098,7 @@ class MyApp(ShowBase):
             "tank_hit_event_serial": self.tank_hit_event_serial,
             "tank_hit_event": self.last_tank_hit_event,
             "connected_tanks": self.network_connected_tank_ids(),
+            "protocol": NETWORK_PROTOCOL_VERSION,
             "tanks": {},
             "shots": {}
         }
