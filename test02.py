@@ -1667,8 +1667,60 @@ class MyApp(ShowBase):
                 "is_player": False
             }
 
+        self.setup_tank_lifecycle_states()
+
+    def setup_tank_lifecycle_states(self):
+        self.tank_lifecycle = {}
+        for tank_id in self.tank_ids_for_state():
+            self.tank_lifecycle[tank_id] = {
+                "alive": True,
+                "reconstituting": False,
+                "lives": PLAYER_MAX_LIVES if tank_id == "0" else None,
+                "hit_cooldown_until": -PLAYER_HIT_COOLDOWN
+            }
+
     def tank_runtime_state(self, tank_id):
         return self.tank_runtime[tank_id]
+
+    def tank_lifecycle_state(self, tank_id):
+        return self.tank_lifecycle[tank_id]
+
+    def tank_is_alive(self, tank_id):
+        return self.tank_lifecycle_state(tank_id).get("alive", True)
+
+    def set_tank_alive(self, tank_id, alive):
+        self.tank_lifecycle_state(tank_id)["alive"] = bool(alive)
+
+    def tank_is_reconstituting(self, tank_id):
+        return self.tank_lifecycle_state(tank_id).get("reconstituting", False)
+
+    def set_tank_reconstituting(self, tank_id, reconstituting):
+        self.tank_lifecycle_state(tank_id)["reconstituting"] = bool(reconstituting)
+
+    def tank_lives(self, tank_id):
+        return self.tank_lifecycle_state(tank_id).get("lives")
+
+    def set_tank_lives(self, tank_id, lives):
+        self.tank_lifecycle_state(tank_id)["lives"] = lives
+        if tank_id == "0":
+            self.player_lives = int(lives)
+
+    def set_tank_hit_cooldown(self, tank_id, seconds):
+        self.tank_lifecycle_state(tank_id)["hit_cooldown_until"] = ClockObject.getGlobalClock().getFrameTime() + seconds
+
+    def tank_hit_cooldown_ready(self, tank_id, now=None):
+        if now is None:
+            now = ClockObject.getGlobalClock().getFrameTime()
+        return now >= self.tank_lifecycle_state(tank_id).get("hit_cooldown_until", 0)
+
+    def tank_is_hittable(self, tank_id, now=None):
+        if tank_id == "0" and (self.game_over or self.tank_lives("0") <= 0):
+            return False
+        if not self.tank_is_alive(tank_id) or self.tank_is_reconstituting(tank_id):
+            return False
+        if not self.tank_hit_cooldown_ready(tank_id, now):
+            return False
+        return not self.tank_body_node(tank_id).isHidden()
 
     def tank_body_node(self, tank_id):
         return self.tank_runtime_state(tank_id)["body"]
@@ -1832,12 +1884,16 @@ class MyApp(ShowBase):
 
     def tank_snapshot_state(self, tank_id):
         body_np = self.tank_body_node(tank_id)
+        lifecycle = self.tank_lifecycle_state(tank_id)
         return {
             "pos": self.point_to_list(body_np.getPos(render)),
             "hpr": self.hpr_to_list(body_np.getHpr(render)),
             "barrel_tilt": self.tank_barrel_tilt(tank_id),
             "hidden": body_np.isHidden(),
-            "shooting": self.tank_is_shooting(tank_id)
+            "shooting": self.tank_is_shooting(tank_id),
+            "alive": lifecycle.get("alive", True),
+            "reconstituting": lifecycle.get("reconstituting", False),
+            "lives": lifecycle.get("lives")
         }
 
     def tank_shot_snapshot_state(self, tank_id):
@@ -1901,6 +1957,9 @@ class MyApp(ShowBase):
         self.waiting_to_start = bool(snapshot.get("waiting_to_start", False))
         self.game_over = bool(snapshot.get("game_over", False))
         self.player_lives = int(snapshot.get("player_lives", self.player_lives))
+        tank0_state = snapshot.get("tanks", {}).get("0", {})
+        if tank0_state.get("lives") is not None:
+            self.set_tank_lives("0", int(tank0_state.get("lives", self.player_lives)))
         self.update_lives_hud()
         player_hit_serial = int(snapshot.get("player_hit_effect_serial", 0))
         if not first_snapshot and player_hit_serial > self.network_player_hit_effect_serial:
@@ -1980,6 +2039,9 @@ class MyApp(ShowBase):
             state["barrel_tilt"] = before["barrel_tilt"] + (after["barrel_tilt"] - before["barrel_tilt"]) * alpha
         state["hidden"] = after.get("hidden", before.get("hidden", False)) if alpha >= 0.5 else before.get("hidden", after.get("hidden", False))
         state["shooting"] = after.get("shooting", before.get("shooting", False)) if alpha >= 0.5 else before.get("shooting", after.get("shooting", False))
+        state["alive"] = after.get("alive", before.get("alive", True)) if alpha >= 0.5 else before.get("alive", after.get("alive", True))
+        state["reconstituting"] = after.get("reconstituting", before.get("reconstituting", False)) if alpha >= 0.5 else before.get("reconstituting", after.get("reconstituting", False))
+        state["lives"] = after.get("lives", before.get("lives"))
         return state
 
     def interpolate_network_snapshot_groups(self, before_targets, after_targets, alpha):
@@ -2029,6 +2091,10 @@ class MyApp(ShowBase):
             return
 
         body_np.show()
+        if not state.get("alive", True) or state.get("reconstituting", False):
+            body_np.hide()
+            return
+
         if tank_id == "0":
             if getattr(self, "player_tank_visual_hidden_for_effect", False):
                 body_np.hide()
@@ -2457,11 +2523,7 @@ class MyApp(ShowBase):
         return hit_height <= PLAYER_HIT_MAX_HEIGHT_ABOVE_GROUND
 
     def player_tank_is_hittable(self):
-        if self.game_over or self.player_lives <= 0:
-            return False
-        if getattr(self, "player_tank_visual_hidden_for_effect", False):
-            return False
-        return True
+        return self.tank_is_hittable("0")
 
     def struck(self, entry):
         if self.is_network_client_controller():
@@ -2495,14 +2557,17 @@ class MyApp(ShowBase):
             tanks_dict[shooter_id].get("shot_shooter_hpr")
         )
         self.enemy_reset_shot(shooter_id)
+        self.set_tank_alive("0", False)
+        self.set_tank_reconstituting("0", True)
         self.record_player_tank_hit_effect()
 
         self.last_player_hit_time = now
-        self.player_lives = max(0, self.player_lives - 1)
+        self.set_tank_hit_cooldown("0", PLAYER_HIT_COOLDOWN)
+        self.set_tank_lives("0", max(0, self.tank_lives("0") - 1))
         self.hit_flash_alpha = 0.5
         self.update_lives_hud()
 
-        if self.player_lives <= 0:
+        if self.tank_lives("0") <= 0:
             self.make_investigation_persistent_for_game_over()
             self.end_game()
 
@@ -2524,13 +2589,16 @@ class MyApp(ShowBase):
             tanks_dict[shooter_id].get("shot_shooter_hpr")
         )
 
+        self.set_tank_alive("0", False)
+        self.set_tank_reconstituting("0", True)
         self.record_player_tank_hit_effect()
         self.last_player_hit_time = now
-        self.player_lives = max(0, self.player_lives - 1)
+        self.set_tank_hit_cooldown("0", PLAYER_HIT_COOLDOWN)
+        self.set_tank_lives("0", max(0, self.tank_lives("0") - 1))
         self.hit_flash_alpha = 0.5
         self.update_lives_hud()
 
-        if self.player_lives <= 0:
+        if self.tank_lives("0") <= 0:
             self.make_investigation_persistent_for_game_over()
             self.end_game()
 
@@ -2588,6 +2656,9 @@ class MyApp(ShowBase):
         if not getattr(self, "player_tank_visual_hidden_for_effect", False):
             return
         self.player_tank_visual_hidden_for_effect = False
+        if not self.game_over and self.tank_lives("0") > 0:
+            self.set_tank_alive("0", True)
+            self.set_tank_reconstituting("0", False)
         self.player_tank_visual.show()
         if self.is_network_client_controller():
             self.player_tank_visual.show(MAIN_CAMERA_MASK)
@@ -2597,6 +2668,8 @@ class MyApp(ShowBase):
     def end_game(self):
         self.game_over = True
         self.waiting_to_start = False
+        self.set_tank_alive("0", False)
+        self.set_tank_reconstituting("0", False)
         if self.last_player_hit_event:
             self.gameOverTextObject.text = "GAME OVER\nI TO INVESTIGATE\nR TO RESTART"
         else:
@@ -2622,6 +2695,10 @@ class MyApp(ShowBase):
         self.camera.setPos(render, self.terrain_position(Point3(0, 0, 0), PLAYER_CAMERA_HEIGHT))
         self.camera.setHpr(0, 0, 0)
         self.set_player_camera_on_terrain()
+        self.set_tank_alive("0", True)
+        self.set_tank_reconstituting("0", False)
+        self.set_tank_lives("0", PLAYER_MAX_LIVES)
+        self.set_tank_hit_cooldown("0", 0)
         self.player_barrel_tilt = 0.0
         for t in tanks_list:
             tanks_dict[t]["barrel_tilt"] = 0.0
@@ -2818,8 +2895,11 @@ class MyApp(ShowBase):
             self.investigateTimerRoot.hide()
 
         self.game_over = False
-        self.player_lives = PLAYER_MAX_LIVES
         self.last_player_hit_time = -PLAYER_HIT_COOLDOWN
+        self.set_tank_alive("0", True)
+        self.set_tank_reconstituting("0", False)
+        self.set_tank_lives("0", PLAYER_MAX_LIVES)
+        self.set_tank_hit_cooldown("0", 0)
         self.hit_flash_alpha = 0
         self.player_tank_visual_hidden_for_effect = False
         self.gameOverTextObject.hide()
@@ -2848,6 +2928,9 @@ class MyApp(ShowBase):
             tanks_dict[t]["frags"].hide()
             tanks_dict[t].pop("last_pos", None)
             tanks_dict[t]["attack_ready_time"] = 0
+            self.set_tank_alive(t, True)
+            self.set_tank_reconstituting(t, False)
+            self.set_tank_hit_cooldown(t, 0)
             self.enemy_reset_shot(t)
         self.update_lives_hud()
 
@@ -3182,9 +3265,16 @@ class MyApp(ShowBase):
 
     def render_player_hud(self):
         self.waiting_to_start = True
-        self.player_lives = PLAYER_MAX_LIVES
         self.game_over = False
         self.last_player_hit_time = -PLAYER_HIT_COOLDOWN
+        self.set_tank_alive("0", True)
+        self.set_tank_reconstituting("0", False)
+        self.set_tank_lives("0", PLAYER_MAX_LIVES)
+        self.set_tank_hit_cooldown("0", 0)
+        for t in tanks_list:
+            self.set_tank_alive(t, True)
+            self.set_tank_reconstituting(t, False)
+            self.set_tank_hit_cooldown(t, 0)
         self.hit_flash_alpha = 0
         self.investigation_mode = False
         self.investigation_available_until = 0
@@ -3945,6 +4035,9 @@ class MyApp(ShowBase):
             tanks_dict[t]["move"] = True
             tanks_dict[t].pop("last_pos", None)
             tanks_dict[t]["tank"].show()
+            self.set_tank_alive(t, True)
+            self.set_tank_reconstituting(t, False)
+            self.set_tank_hit_cooldown(t, PLAYER_HIT_COOLDOWN)
             self.set_tank_attack_cooldown(t, TANK_RESPAWN_ATTACK_COOLDOWN)
 
     def set_tank_attack_cooldown(self, t, seconds):
@@ -4160,7 +4253,7 @@ class MyApp(ShowBase):
         closest_hit = None
         for t in tanks_list:
             tank_np = tanks_dict[t]["tank"]
-            if tank_np.isHidden():
+            if not self.tank_is_hittable(t):
                 continue
 
             center = render.getRelativePoint(tank_np, Point3(0, 0, 0.9))
@@ -4272,10 +4365,13 @@ class MyApp(ShowBase):
     def register_player_tank_hit(self, tank_id):
         if tank_id not in tanks_list:
             return
-        if tanks_dict[tank_id]["tank"].isHidden():
+        if not self.tank_is_hittable(tank_id):
             return
 
         print('hit tank ' + tank_id)
+        self.set_tank_alive(tank_id, False)
+        self.set_tank_reconstituting(tank_id, True)
+        self.set_tank_hit_cooldown(tank_id, PLAYER_HIT_COOLDOWN)
         tanks_dict[tank_id]["move"] = False
         tanks_dict[tank_id]["tank"].hide()
         tanks_dict[tank_id]["frags"].showThrough()
