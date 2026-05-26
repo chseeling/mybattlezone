@@ -10,6 +10,7 @@ battle-server
   owns terrain, obstacles, shots, hits, lives, respawn, timing
   no full player HUD; eventually no GPU-heavy rendering
   receives tank inputs and broadcasts snapshots/events
+  runs unclaimed nonzero tanks as local autonomous enemies
 
 tank-client-0
   human/controller process for tank 0
@@ -17,7 +18,7 @@ tank-client-0
   sends tank 0 input to server
 
 tank-client-1
-  human/controller process for tank 1
+  human or autonomous controller process for tank 1
   renders tank 1 view from server snapshots
   sends tank 1 input to server
 ```
@@ -41,6 +42,7 @@ tank-client-1
 - Allow `BATTLEZONE_NET_TANK=0` on a client.
 - Move tank 0 view rendering onto the same snapshot path as tank 1.
 - Server should treat tank 0 input like any other `RemoteTankController`.
+- In single-player client/server mode, tank 0 is the only required client; tanks 1-3 can remain server-side AI.
 - Remove special cases where tank 0 is the authoritative camera.
 - Share tank hit events across all tank ids so clients can render destruction for tank 0 and tank 1 from the same snapshot event.
 - Track and display remaining lives for every active tank, not just tank 0.
@@ -66,28 +68,34 @@ tank-client-1
 - Server: set `BATTLEZONE_NET_MODE=server`.
 - Compatibility host: set `BATTLEZONE_NET_MODE=host`.
 - Client: set `BATTLEZONE_NET_MODE=client`.
+- Tank clients choose their controller with `BATTLEZONE_NET_CONTROLLER=human` or `autonomous`.
+- Unclaimed nonzero tanks remain server-side autonomous tanks. A tank client can claim one later for multiplayer or AI-offload tests.
+- Start/restart is client-driven: connected tank clients send requests, and the server validates readiness before changing authoritative simulation state.
 
 Useful environment variables:
 
 - `BATTLEZONE_NET_HOST`: server address. Use `0.0.0.0` for the server bind address; use the host PC LAN IP from clients.
 - `BATTLEZONE_NET_PORT`: UDP port, default `51515`.
 - `BATTLEZONE_NET_TANK`: controlled tank id, default `1`.
+- `BATTLEZONE_NET_CONTROLLER`: `human` or `autonomous`. Defaults to `human` for tank 0 and `autonomous` for other tank clients.
+- Autonomous/nonzero tank clients currently start with 10 lives; tank 0 starts with 3 lives.
 - Client presence timeout is currently `2.5` seconds.
 - Client join requests are sent once per second until accepted.
-- `BATTLEZONE_NET_CLIENT_LOW_RENDER`: client-only lighter render mode, default `1`.
+- `BATTLEZONE_NET_CLIENT_LOW_RENDER`: client-only lighter render mode. Defaults to `0` for tank 0 and `1` for other tank clients.
 - `BATTLEZONE_NET_SERVER_LOW_RENDER`: server-only lighter render mode, default `1`.
-- `BATTLEZONE_AUDIO_FOCUS_MUTE`: mute this process when its window is not focused, default `1`.
-- `BATTLEZONE_ACTIVE_TANKS`: comma-separated active non-player tanks. Network modes default to `1` for a tank 0 + tank 1 test.
+- Full-render tank clients use a short vector afterimage to soften 25 Hz snapshot motion without increasing network rate.
+- `BATTLEZONE_AUDIO_FOCUS_MUTE`: mute this process when its window is not focused. Defaults to `0` for the tank 0 human client so OBS can capture it, and `1` for server/autonomous/secondary clients.
+- `BATTLEZONE_ACTIVE_TANKS`: comma-separated active non-player tanks. Defaults to `1,2,3`; set it to `1` for a minimal tank 0 + tank 1 test.
 
 ## Local Test Recipes
 
-Authoritative server:
+Authoritative server with three server-side AI enemies:
 
 ```powershell
 $env:BATTLEZONE_NET_MODE="server"
 $env:BATTLEZONE_NET_HOST="0.0.0.0"
 $env:BATTLEZONE_NET_PORT="51515"
-$env:BATTLEZONE_ACTIVE_TANKS="1"
+Remove-Item Env:\BATTLEZONE_ACTIVE_TANKS -ErrorAction SilentlyContinue
 $env:BATTLEZONE_NET_SERVER_LOW_RENDER="1"
 .\run.ps1
 ```
@@ -99,19 +107,21 @@ $env:BATTLEZONE_NET_MODE="client"
 $env:BATTLEZONE_NET_HOST="127.0.0.1"
 $env:BATTLEZONE_NET_PORT="51515"
 $env:BATTLEZONE_NET_TANK="0"
-$env:BATTLEZONE_ACTIVE_TANKS="1"
+$env:BATTLEZONE_NET_CONTROLLER="human"
+Remove-Item Env:\BATTLEZONE_ACTIVE_TANKS -ErrorAction SilentlyContinue
 $env:BATTLEZONE_NET_CLIENT_LOW_RENDER="0"
 .\run.ps1
 ```
 
-Tank 1 low-render local client:
+Optional tank 1 autonomous low-render local client, for testing a claimed nonzero tank process:
 
 ```powershell
 $env:BATTLEZONE_NET_MODE="client"
 $env:BATTLEZONE_NET_HOST="127.0.0.1"
 $env:BATTLEZONE_NET_PORT="51515"
 $env:BATTLEZONE_NET_TANK="1"
-$env:BATTLEZONE_ACTIVE_TANKS="1"
+$env:BATTLEZONE_NET_CONTROLLER="autonomous"
+Remove-Item Env:\BATTLEZONE_ACTIVE_TANKS -ErrorAction SilentlyContinue
 $env:BATTLEZONE_NET_CLIENT_LOW_RENDER="1"
 .\run.ps1
 ```

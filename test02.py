@@ -16,7 +16,7 @@ from direct.showbase.ShowBase import ShowBase
 from direct.task import Task
 
 from panda3d.core import AmbientLight
-from panda3d.core import Vec4, Mat4, Point2, Point3, Point4, BitMask32
+from panda3d.core import Vec4, Mat4, Point2, Point3, Point4, BitMask32, AudioSound
 from panda3d.core import LineSegs, NodePath, TransparencyAttrib, ColorBlendAttrib, TextNode, ClockObject, CardMaker
 from panda3d.core import Geom, GeomNode, GeomTriangles, GeomVertexData, GeomVertexFormat, GeomVertexWriter
 from panda3d.core import LVecBase4, LVecBase2d, InputDevice, WindowProperties, Camera, PerspectiveLens
@@ -65,7 +65,7 @@ tanks_dict = {"0": {},
 
 def configured_active_tanks():
     network_mode = os.environ.get("BATTLEZONE_NET_MODE", "").lower()
-    default_tanks = "1" if network_mode in {"server", "host", "client"} else "1,2,3"
+    default_tanks = "1,2,3"
     requested = os.environ.get("BATTLEZONE_ACTIVE_TANKS", default_tanks)
     active = {
         tank_id.strip()
@@ -96,6 +96,10 @@ NETWORK_MODE_LABEL = "server" if os.environ.get("BATTLEZONE_NET_MODE", "").lower
 NETWORK_HOST = os.environ.get("BATTLEZONE_NET_HOST", "127.0.0.1")
 NETWORK_PORT = int(os.environ.get("BATTLEZONE_NET_PORT", "51515"))
 NETWORK_TANK_ID = os.environ.get("BATTLEZONE_NET_TANK", "1")
+NETWORK_CLIENT_CONTROLLER = os.environ.get(
+    "BATTLEZONE_NET_CONTROLLER",
+    "human" if NETWORK_TANK_ID == "0" else "autonomous"
+).lower()
 NETWORK_PROTOCOL_VERSION = 1
 NETWORK_SEND_RATE = 30.0
 NETWORK_JOIN_RATE = 1.0
@@ -104,11 +108,17 @@ NETWORK_SMOOTHING_RATE = 14.0
 NETWORK_RENDER_DELAY = 0.08
 NETWORK_EFFECT_DELAY = NETWORK_RENDER_DELAY
 NETWORK_CLIENT_TIMEOUT = 2.5
-NETWORK_CLIENT_LOW_RENDER = os.environ.get("BATTLEZONE_NET_CLIENT_LOW_RENDER", "1").lower() in {"1", "true", "yes", "on"}
+NETWORK_CLIENT_LOW_RENDER_DEFAULT = "0" if NETWORK_TANK_ID == "0" else "1"
+NETWORK_CLIENT_LOW_RENDER = os.environ.get("BATTLEZONE_NET_CLIENT_LOW_RENDER", NETWORK_CLIENT_LOW_RENDER_DEFAULT).lower() in {"1", "true", "yes", "on"}
 NETWORK_CLIENT_LOW_RENDER_SIZE = (960, 540)
 NETWORK_SERVER_LOW_RENDER = os.environ.get("BATTLEZONE_NET_SERVER_LOW_RENDER", "1").lower() in {"1", "true", "yes", "on"}
 NETWORK_SERVER_LOW_RENDER_SIZE = (720, 405)
-AUDIO_FOCUS_MUTE = os.environ.get("BATTLEZONE_AUDIO_FOCUS_MUTE", "1").lower() in {"1", "true", "yes", "on"}
+AUDIO_FOCUS_MUTE_DEFAULT = "0" if (
+    NETWORK_MODE == "client" and
+    NETWORK_TANK_ID == "0" and
+    NETWORK_CLIENT_CONTROLLER not in {"auto", "autonomous", "ai", "enemy"}
+) else "1"
+AUDIO_FOCUS_MUTE = os.environ.get("BATTLEZONE_AUDIO_FOCUS_MUTE", AUDIO_FOCUS_MUTE_DEFAULT).lower() in {"1", "true", "yes", "on"}
 MOUNTAIN_BLOOM_ALPHA = 0.11
 MOUNTAIN_BLOOM_THICKNESS = 7
 MOUNTAIN_HALO_ALPHA = 0.025
@@ -136,8 +146,12 @@ HUD_VIEWPORTS = (
 )
 HUD_VIEW_PADDING = 0.012
 PLAYER_MAX_LIVES = 3
+AUTONOMOUS_TANK_MAX_LIVES = 10
 PLAYER_HIT_COOLDOWN = 1.2
 PLAYER_FLASH_SECONDS = 0.45
+PLAYER_HIT_SHAKE_SECONDS = 0.32
+PLAYER_HIT_SHAKE_YAW = 1.2
+PLAYER_HIT_SHAKE_PITCH = 0.7
 PLAYER_COLLISION_RADIUS = 1.5
 PLAYER_HIT_COLLISION_RADIUS = 1.45
 PLAYER_HIT_COLLISION_CENTER_Z = -1.15
@@ -778,6 +792,7 @@ class UdpTankInputBridge:
         self.client_addrs = {}
         self.client_last_seen = {}
         self.client_join_status = {}
+        self.client_controller_types = {}
         self.join_accepted = False
         self.join_rejected_reason = ""
         self.last_join_send_time = -999
@@ -844,6 +859,15 @@ class UdpTankInputBridge:
             if message_type == "leave":
                 self.handle_host_leave(message, addr)
                 continue
+            if message_type == "start":
+                self.handle_host_start(message, addr)
+                continue
+            if message_type == "restart":
+                self.handle_host_restart(message, addr)
+                continue
+            if message_type == "enemy_fire":
+                self.handle_host_enemy_fire(message, addr)
+                continue
 
             if message_type != "input":
                 continue
@@ -851,18 +875,12 @@ class UdpTankInputBridge:
             tank_id = str(message.get("tank_id", self.tank_id))
             if tank_id not in network_tank_ids():
                 continue
-            if not self.accept_host_client_claim(tank_id, addr, task_time):
+            if not self.accept_host_client_claim(tank_id, addr, task_time, message.get("controller")):
                 continue
 
             self.last_packet_time = task_time
             self.last_packet_count += 1
-            self.app.submit_remote_tank_input(
-                tank_id,
-                throttle=float(message.get("throttle", 0.0)),
-                turn=float(message.get("turn", 0.0)),
-                fire=bool(message.get("fire", False)),
-                barrel_tilt=float(message.get("barrel_tilt", 0.0))
-            )
+            self.app.submit_remote_tank_command(tank_id, self.command_from_message(message))
 
     def handle_host_join(self, message, addr, task_time):
         tank_id = str(message.get("tank_id", self.tank_id))
@@ -870,13 +888,13 @@ class UdpTankInputBridge:
             self.send_host_join_ack(addr, tank_id, False, "invalid tank")
             return
 
-        if not self.accept_host_client_claim(tank_id, addr, task_time):
+        if not self.accept_host_client_claim(tank_id, addr, task_time, message.get("controller")):
             self.send_host_join_ack(addr, tank_id, False, "tank already claimed")
             return
 
         self.send_host_join_ack(addr, tank_id, True, "")
 
-    def accept_host_client_claim(self, tank_id, addr, task_time):
+    def accept_host_client_claim(self, tank_id, addr, task_time, controller=None):
         existing_addr = self.client_addrs.get(tank_id)
         if existing_addr is not None and existing_addr != addr:
             return False
@@ -885,6 +903,9 @@ class UdpTankInputBridge:
         self.client_addrs[tank_id] = addr
         self.client_last_seen[tank_id] = task_time
         self.client_join_status[tank_id] = "accepted"
+        if controller:
+            self.client_controller_types[tank_id] = str(controller).upper()
+        self.app.set_remote_control_tank(tank_id)
         return True
 
     def release_host_client_claim(self, tank_id, addr=None):
@@ -897,7 +918,9 @@ class UdpTankInputBridge:
         self.client_addrs.pop(tank_id, None)
         self.client_last_seen.pop(tank_id, None)
         self.client_join_status.pop(tank_id, None)
+        self.client_controller_types.pop(tank_id, None)
         self.app.submit_remote_tank_input(tank_id, throttle=0.0, turn=0.0, fire=False, barrel_tilt=0.0)
+        self.app.clear_remote_control_tank(tank_id)
         return True
 
     def handle_host_leave(self, message, addr):
@@ -905,6 +928,30 @@ class UdpTankInputBridge:
         if tank_id not in network_tank_ids():
             return
         self.release_host_client_claim(tank_id, addr)
+
+    def handle_host_restart(self, message, addr):
+        tank_id = str(message.get("tank_id", self.tank_id))
+        if tank_id != "0":
+            return
+        if self.client_addrs.get(tank_id) != addr:
+            return
+        self.app.restart_game()
+
+    def handle_host_start(self, message, addr):
+        tank_id = str(message.get("tank_id", self.tank_id))
+        if tank_id not in network_tank_ids():
+            return
+        if self.client_addrs.get(tank_id) != addr:
+            return
+        self.app.start_game()
+
+    def handle_host_enemy_fire(self, message, addr):
+        tank_id = str(message.get("tank_id", self.tank_id))
+        if tank_id != "0":
+            return
+        if self.client_addrs.get(tank_id) != addr:
+            return
+        self.app.set_enemy_shooting_suspended(bool(message.get("suspended", False)))
 
     def send_host_join_ack(self, addr, tank_id, accepted, reason):
         payload = {
@@ -995,7 +1042,8 @@ class UdpTankInputBridge:
         payload = {
             "type": "join",
             "protocol": NETWORK_PROTOCOL_VERSION,
-            "tank_id": self.tank_id
+            "tank_id": self.tank_id,
+            "controller": self.app.network_client_controller_label()
         }
         try:
             self.socket.sendto(json.dumps(payload).encode("utf-8"), self.server_addr)
@@ -1019,22 +1067,71 @@ class UdpTankInputBridge:
             pass
         self.join_accepted = False
 
+    def send_client_restart(self):
+        if self.mode != "client" or not hasattr(self, "server_addr"):
+            return
+        if not self.join_accepted:
+            return
+
+        payload = {
+            "type": "restart",
+            "protocol": NETWORK_PROTOCOL_VERSION,
+            "tank_id": self.tank_id
+        }
+        try:
+            self.socket.sendto(json.dumps(payload).encode("utf-8"), self.server_addr)
+        except OSError:
+            self.mark_client_disconnected()
+
+    def send_client_start(self):
+        if self.mode != "client" or not hasattr(self, "server_addr"):
+            return
+        if not self.join_accepted:
+            return
+
+        payload = {
+            "type": "start",
+            "protocol": NETWORK_PROTOCOL_VERSION,
+            "tank_id": self.tank_id
+        }
+        try:
+            self.socket.sendto(json.dumps(payload).encode("utf-8"), self.server_addr)
+        except OSError:
+            self.mark_client_disconnected()
+
+    def send_client_enemy_fire(self, suspended):
+        if self.mode != "client" or not hasattr(self, "server_addr"):
+            return
+        if not self.join_accepted:
+            return
+
+        payload = {
+            "type": "enemy_fire",
+            "protocol": NETWORK_PROTOCOL_VERSION,
+            "tank_id": self.tank_id,
+            "suspended": bool(suspended)
+        }
+        try:
+            self.socket.sendto(json.dumps(payload).encode("utf-8"), self.server_addr)
+        except OSError:
+            self.mark_client_disconnected()
+
     def send_client_input(self, task_time):
         if not self.join_accepted:
             return
         if task_time - self.last_send_time < 1.0 / NETWORK_SEND_RATE:
             return
+        dt = 0.05 if self.last_send_time <= 0 else min(max(task_time - self.last_send_time, 0.0), 0.05)
         self.last_send_time = task_time
 
-        command = self.capture_local_input()
+        command = self.capture_local_input(dt, task_time)
         payload = {
             "type": "input",
             "tank_id": self.tank_id,
-            "throttle": command.throttle,
-            "turn": command.turn,
-            "fire": command.fire,
-            "barrel_tilt": command.barrel_tilt
+            "protocol": NETWORK_PROTOCOL_VERSION,
+            "controller": self.app.network_client_controller_label()
         }
+        payload.update(self.command_to_message(command))
         try:
             self.socket.sendto(json.dumps(payload).encode("utf-8"), self.server_addr)
         except OSError:
@@ -1048,10 +1145,20 @@ class UdpTankInputBridge:
         self.app.network_join_accepted = False
         self.app.network_join_rejected_reason = ""
         self.app.network_snapshot_received = False
+        self.app.network_snapshot_shot_visible = {}
+        if hasattr(self.app, "update_network_client_audio_state"):
+            self.app.update_network_client_audio_state(True, False)
         if self.app.is_network_client_controller():
             self.app.update_network_client_presentation()
 
-    def capture_local_input(self):
+    def capture_local_input(self, dt=0.05, task_time=0.0):
+        if (
+                hasattr(self.app, "network_client_uses_autonomous_controller") and
+                self.app.network_client_uses_autonomous_controller()):
+            return self.app.network_autonomous_client_command(dt, task_time)
+        return self.capture_human_input()
+
+    def capture_human_input(self):
         if base.mouseWatcherNode is None:
             return TankCommand()
 
@@ -1080,6 +1187,41 @@ class UdpTankInputBridge:
                 throttle += 1.0
 
         return TankCommand(throttle=throttle, turn=turn, fire=fire, barrel_tilt=barrel_tilt)
+
+    def command_to_message(self, command):
+        payload = {
+            "throttle": command.throttle,
+            "turn": command.turn,
+            "fire": command.fire,
+            "barrel_tilt": command.barrel_tilt
+        }
+        if command.desired_world_pos is not None:
+            payload["desired_world_pos"] = [
+                command.desired_world_pos[0],
+                command.desired_world_pos[1],
+                command.desired_world_pos[2]
+            ]
+        if command.desired_heading is not None:
+            payload["desired_heading"] = command.desired_heading
+        if command.desired_barrel_tilt is not None:
+            payload["desired_barrel_tilt"] = command.desired_barrel_tilt
+        return payload
+
+    def command_from_message(self, message):
+        desired_world_pos = message.get("desired_world_pos")
+        if desired_world_pos is not None:
+            desired_world_pos = Point3(*desired_world_pos)
+        desired_heading = message.get("desired_heading")
+        desired_barrel_tilt = message.get("desired_barrel_tilt")
+        return TankCommand(
+            throttle=float(message.get("throttle", 0.0)),
+            turn=float(message.get("turn", 0.0)),
+            fire=bool(message.get("fire", False)),
+            barrel_tilt=float(message.get("barrel_tilt", 0.0)),
+            desired_world_pos=desired_world_pos,
+            desired_heading=None if desired_heading is None else float(desired_heading),
+            desired_barrel_tilt=None if desired_barrel_tilt is None else float(desired_barrel_tilt)
+        )
 
 
 class SineAiTankController(TankController):
@@ -1147,10 +1289,14 @@ class TacticalAiTankController(TankController):
         self.debug_state = "INIT"
 
     def command(self, app, avatar, dt, task_time):
-        tank_state = tanks_dict[self.tank_id]
-        if not tank_state["move"] or avatar.is_hidden():
+        tank_can_move = True if self.tank_id == "0" else tanks_dict[self.tank_id]["move"]
+        if not tank_can_move or avatar.is_hidden():
             self.aim_acquired_since = None
             self.debug_state = "DOWN"
+            return TankCommand()
+        if self.tank_id != "0" and not app.primary_player_target_available():
+            self.aim_acquired_since = None
+            self.debug_state = "WAIT"
             return TankCommand()
 
         observation = app.build_tank_observation(self.tank_id)
@@ -1325,6 +1471,7 @@ class MyApp(ShowBase):
         self.mainShot_snd = base.loader.loadSfx("sfx/mainShot.ogg")
         self.enemyShot_snd = base.loader.loadSfx("sfx/enemyShot.ogg")
         self.enemyTankExplosion_snd = base.loader.loadSfx("sfx/enemyTankExplosion.ogg")
+        self.playerHit_snd = base.loader.loadSfx("sfx/enemyTankExplosion.ogg")
         self.gameOver_snd = base.loader.loadSfx("sfx/gameOver.wav")
         self.investigation_snd = base.loader.loadSfx("sfx/investigation.wav")
         self.investigation_snd.setLoop(True)
@@ -1335,6 +1482,7 @@ class MyApp(ShowBase):
             self.mainShot_snd: 1.0,
             self.enemyShot_snd: 1.0,
             self.enemyTankExplosion_snd: 1.0,
+            self.playerHit_snd: 0.42,
             self.gameOver_snd: 1.0,
             self.investigation_snd: 0.9,
         }
@@ -1404,10 +1552,12 @@ class MyApp(ShowBase):
         self.player_tank_visual = render.attachNewNode("Tank0-Visual")
         self.tank.instanceTo(self.player_tank_visual)
         self.player_tank_visual.setColorScale(0.05, 0.35, 1.0, 1.0)
-        self.player_tank_visual.hide(MAIN_CAMERA_MASK)
+        self.player_tank_visual.hide(MAIN_CAMERA_MASK | AUX_CAMERA_MASK)
         self.player_hit_effect_serial = 0
+        self.player_damage_event_serial = 0
         self.player_hit_effect_pos = Point3(0, 0, 0)
         self.player_hit_effect_hpr = Point3(0, 0, 0)
+        self.network_player_damage_event_serial = 0
         self.network_player_hit_effect_serial = 0
         self.tank_hit_event_serial = 0
         self.last_tank_hit_event = {}
@@ -1541,6 +1691,7 @@ class MyApp(ShowBase):
         self.accept('control-up', self.shot_clear)
         self.accept('shot-done', self.reset_shot)
         self.accept('b', self.toggle_bloom)
+        self.accept('z', self.toggle_network_interpolation)
         self.accept('s', self.toggle_enemy_shooting)
         self.accept('d', self.toggle_recon_drone)
         self.accept('i', self.toggle_investigation)
@@ -1592,7 +1743,9 @@ class MyApp(ShowBase):
         self.tank_controllers = {
             "0": self.human_tank_controller
         }
-        self.ai_tank_controllers = {}
+        self.ai_tank_controllers = {
+            "0": TacticalAiTankController("0")
+        }
         self.remote_tank_controllers = {}
         self.remote_tank_controllers["0"] = RemoteTankController()
 
@@ -1617,9 +1770,14 @@ class MyApp(ShowBase):
         self.network_snapshot_received = False
         self.network_snapshot_targets = {"tanks": {}, "shots": {}}
         self.network_snapshot_history = []
+        self.network_interpolation_enabled = True
         self.network_connected_tanks = []
         self.network_join_accepted = False
         self.network_join_rejected_reason = ""
+        self.network_client_controller_type = self.normalized_network_client_controller_type()
+        self.network_client_last_waiting = True
+        self.network_client_last_game_over = False
+        self.network_snapshot_shot_visible = {}
         if NETWORK_MODE not in {"host", "client"}:
             return
 
@@ -1643,13 +1801,12 @@ class MyApp(ShowBase):
         if NETWORK_MODE == "host":
             if NETWORK_MODE_LABEL == "server":
                 self.set_remote_control_tank("0")
-                for t in tanks_list:
-                    self.set_remote_control_tank(t)
                 self.update_network_server_presentation()
             else:
                 self.set_remote_control_tank(NETWORK_TANK_ID)
         elif NETWORK_MODE == "client":
-            self.set_human_control_tank(NETWORK_TANK_ID)
+            if not self.network_client_uses_autonomous_controller():
+                self.set_human_control_tank(NETWORK_TANK_ID)
             self.network_client_controller_mode = True
             self.network_client_low_render_mode = NETWORK_CLIENT_LOW_RENDER
             self.update_network_client_presentation()
@@ -1673,14 +1830,49 @@ class MyApp(ShowBase):
             return "JOIN REJECTED"
         if not self.network_join_accepted:
             return "JOINING"
+        controller_label = self.network_client_controller_label()
         if self.is_network_client_low_render():
-            return "LOW RENDER MODE"
-        return "WATCH HOST WINDOW"
+            return "{} LOW RENDER".format(controller_label)
+        return "{} FULL RENDER".format(controller_label)
+
+    def normalized_network_client_controller_type(self):
+        if NETWORK_CLIENT_CONTROLLER in {"auto", "autonomous", "ai", "enemy"}:
+            return "autonomous"
+        return "human"
+
+    def network_client_uses_autonomous_controller(self):
+        return getattr(self, "network_client_controller_type", "human") == "autonomous"
+
+    def network_client_controller_label(self):
+        return "AUTO" if self.network_client_uses_autonomous_controller() else "HUMAN"
+
+    def network_autonomous_client_command(self, dt, task_time):
+        if not self.network_snapshot_received:
+            return TankCommand()
+        tank_id = NETWORK_TANK_ID
+        controller = self.ai_tank_controllers.get(tank_id)
+        avatar = self.tank_avatars.get(tank_id)
+        if controller is None or avatar is None:
+            return TankCommand()
+        return controller.command(self, avatar, dt, task_time)
 
     def network_connected_tank_ids(self):
         if self.network_bridge is None or not hasattr(self.network_bridge, "connected_tank_ids"):
             return []
         return self.network_bridge.connected_tank_ids()
+
+    def network_tank_client_connected(self, tank_id):
+        return tank_id in set(self.network_connected_tank_ids())
+
+    def server_required_clients_connected(self):
+        if not self.is_network_server_authority():
+            return True
+        return self.server_lobby_expected_client_tanks().issubset(set(self.network_connected_tank_ids()))
+
+    def primary_player_target_available(self):
+        if self.is_network_server_authority():
+            return self.network_tank_client_connected("0")
+        return True
 
     def apply_network_client_low_render_settings(self):
         if not self.is_network_client_low_render():
@@ -1705,11 +1897,7 @@ class MyApp(ShowBase):
             return
 
         self.waiting_to_start = True
-        detail = self.network_client_mode_label()
-        if self.network_join_rejected_reason:
-            detail = self.network_join_rejected_reason.upper()
-        self.startTextObject.text = "REMOTE CONTROLLER\nTANK {}\n{}".format(NETWORK_TANK_ID, detail)
-        self.startTextObject.show()
+        self.update_network_client_start_prompt()
         for text_object in getattr(self, "environmentNameTextObjects", []):
             text_object.hide()
         self.environmentTextObject.hide()
@@ -1733,15 +1921,13 @@ class MyApp(ShowBase):
             connected = len(connected_tanks)
         else:
             connected_tanks = []
-        connected_text = "TANKS " + ",".join(connected_tanks) if connected_tanks else "WAITING"
-        self.startTextObject.text = "BATTLEZONE SERVER\n{}\n{} CLIENT{}\nENTER TO START".format(
-            connected_text,
-            connected,
-            "" if connected == 1 else "S"
-        )
+        controller_types = {}
+        if self.network_bridge is not None:
+            controller_types = getattr(self.network_bridge, "client_controller_types", {})
+        self.update_server_lobby_overlay(connected_tanks, controller_types)
         self.position_lives_table()
         if self.waiting_to_start:
-            self.startTextObject.show()
+            self.startTextObject.hide()
         for text_object in getattr(self, "environmentNameTextObjects", []):
             text_object.hide()
         self.environmentTextObject.hide()
@@ -1797,6 +1983,12 @@ class MyApp(ShowBase):
             barrel_tilt=barrel_tilt
         )
 
+    def submit_remote_tank_command(self, tank_id, command):
+        if tank_id not in network_tank_ids():
+            return
+
+        self.remote_tank_controllers[tank_id].submit_command(command)
+
     def updateNetworkTask(self, task):
         if self.network_bridge is not None:
             self.network_bridge.update(getattr(task, "time", ClockObject.getGlobalClock().getFrameTime()))
@@ -1818,6 +2010,55 @@ class MyApp(ShowBase):
         audible = self.audio_process_should_be_audible() if hasattr(self, "audio_has_focus") else True
         for sound, base_volume in getattr(self, "sound_base_volumes", {}).items():
             sound.setVolume(base_volume if audible else 0.0)
+
+    def update_network_client_audio_state(self, waiting, game_over):
+        if not self.is_network_client_controller():
+            return
+        if self.investigation_mode:
+            return
+
+        was_waiting = getattr(self, "network_client_last_waiting", True)
+        was_game_over = getattr(self, "network_client_last_game_over", False)
+        self.network_client_last_waiting = waiting
+        self.network_client_last_game_over = game_over
+
+        if waiting:
+            self.ambient_snd.stop()
+            return
+
+        if game_over:
+            self.ambient_snd.stop()
+            if not was_game_over:
+                self.gameOver_snd.play()
+            return
+
+        if was_waiting or was_game_over or self.ambient_snd.status() != AudioSound.PLAYING:
+            self.gameOver_snd.stop()
+            self.ambient_snd.play()
+
+    def trigger_player_hit_feedback(self):
+        if self.is_network_server_authority():
+            return
+        self.hit_flash_alpha = 0.65
+        now = ClockObject.getGlobalClock().getFrameTime()
+        self.player_hit_shake_started_at = now
+        self.player_hit_shake_until = now + PLAYER_HIT_SHAKE_SECONDS
+        self.playerHit_snd.play()
+
+    def record_player_damage_feedback(self):
+        self.player_damage_event_serial += 1
+        self.trigger_player_hit_feedback()
+
+    def apply_player_hit_camera_shake(self):
+        now = ClockObject.getGlobalClock().getFrameTime()
+        if now >= getattr(self, "player_hit_shake_until", 0):
+            return
+        duration = max(0.001, PLAYER_HIT_SHAKE_SECONDS)
+        elapsed = max(0, now - getattr(self, "player_hit_shake_started_at", now))
+        falloff = max(0.0, 1.0 - elapsed / duration)
+        jitter_yaw = math.sin(elapsed * 92.0) * PLAYER_HIT_SHAKE_YAW * falloff
+        jitter_pitch = math.sin(elapsed * 137.0 + 0.7) * PLAYER_HIT_SHAKE_PITCH * falloff
+        self.camera.setHpr(self.camera, jitter_yaw, jitter_pitch, 0)
 
     def window_has_audio_focus(self):
         try:
@@ -1899,7 +2140,7 @@ class MyApp(ShowBase):
             self.tank_lifecycle[tank_id] = {
                 "alive": True,
                 "reconstituting": False,
-                "lives": PLAYER_MAX_LIVES,
+                "lives": self.tank_max_lives(tank_id),
                 "hit_cooldown_until": -PLAYER_HIT_COOLDOWN
             }
 
@@ -1908,6 +2149,9 @@ class MyApp(ShowBase):
 
     def tank_lifecycle_state(self, tank_id):
         return self.tank_lifecycle[tank_id]
+
+    def tank_max_lives(self, tank_id):
+        return PLAYER_MAX_LIVES if tank_id == "0" else AUTONOMOUS_TANK_MAX_LIVES
 
     def tank_is_alive(self, tank_id):
         return self.tank_lifecycle_state(tank_id).get("alive", True)
@@ -1952,6 +2196,28 @@ class MyApp(ShowBase):
             for name, lives_text in self.tank_lives_rows()
         ])
 
+    def server_lobby_rows(self, connected_tanks=None, controller_types=None):
+        connected = set(connected_tanks or [])
+        controller_types = controller_types or {}
+        rows = []
+        for tank_id in self.tank_ids_for_state():
+            lives = self.tank_lives(tank_id)
+            lives_text = "-" if lives is None else str(int(lives))
+            if tank_id in connected:
+                controller = controller_types.get(tank_id, "CLIENT")
+                link_state = "JOINED"
+            elif tank_id == "0":
+                controller = "HUMAN"
+                link_state = "WAITING"
+            else:
+                controller = "AI"
+                link_state = "SERVER"
+            rows.append((tank_id, controller, lives_text, link_state))
+        return rows
+
+    def server_lobby_expected_client_tanks(self):
+        return {"0"}
+
     def set_tank_hit_cooldown(self, tank_id, seconds):
         self.tank_lifecycle_state(tank_id)["hit_cooldown_until"] = ClockObject.getGlobalClock().getFrameTime() + seconds
 
@@ -1962,6 +2228,8 @@ class MyApp(ShowBase):
 
     def tank_is_hittable(self, tank_id, now=None):
         if tank_id == "0" and self.game_over:
+            return False
+        if tank_id == "0" and self.is_network_server_authority() and not self.network_tank_client_connected("0"):
             return False
         if self.tank_lives(tank_id) is not None and self.tank_lives(tank_id) <= 0:
             return False
@@ -2134,6 +2402,8 @@ class MyApp(ShowBase):
     def tank_snapshot_state(self, tank_id):
         body_np = self.tank_body_node(tank_id)
         lifecycle = self.tank_lifecycle_state(tank_id)
+        controller = getattr(self, "ai_tank_controllers", {}).get(tank_id)
+        debug_state = getattr(controller, "debug_state", "") if controller is not None else ""
         return {
             "pos": self.point_to_list(body_np.getPos(render)),
             "hpr": self.hpr_to_list(body_np.getHpr(render)),
@@ -2142,7 +2412,8 @@ class MyApp(ShowBase):
             "shooting": self.tank_is_shooting(tank_id),
             "alive": lifecycle.get("alive", True),
             "reconstituting": lifecycle.get("reconstituting", False),
-            "lives": lifecycle.get("lives")
+            "lives": lifecycle.get("lives"),
+            "debug_state": debug_state
         }
 
     def tank_shot_snapshot_state(self, tank_id):
@@ -2159,10 +2430,21 @@ class MyApp(ShowBase):
             return
 
         self.sync_tank_body_to_control("0")
-        if self.is_network_client_controller():
-            self.player_tank_visual.show(MAIN_CAMERA_MASK)
+        if self.is_network_server_authority():
+            self.player_tank_visual.hide(MAIN_CAMERA_MASK | AUX_CAMERA_MASK)
+            return
+
+        if self.current_view_tank_id() == "0":
+            self.player_tank_visual.hide(MAIN_CAMERA_MASK | AUX_CAMERA_MASK)
         else:
-            self.player_tank_visual.hide(MAIN_CAMERA_MASK)
+            self.player_tank_visual.show(MAIN_CAMERA_MASK | AUX_CAMERA_MASK)
+
+    def current_view_tank_id(self):
+        if self.is_network_client_controller():
+            return NETWORK_TANK_ID
+        if self.is_network_server_authority():
+            return None
+        return "0"
 
     def network_view_state_for_tank(self, tank_id, tank_states):
         state = tank_states.get(tank_id) or tank_states.get("0")
@@ -2176,7 +2458,9 @@ class MyApp(ShowBase):
             "environment_index": self.environment_index,
             "waiting_to_start": self.waiting_to_start,
             "game_over": self.game_over,
+            "enemy_shooting_suspended": self.enemy_shooting_suspended,
             "player_lives": self.player_lives,
+            "player_damage_event_serial": self.player_damage_event_serial,
             "player_hit_effect_serial": self.player_hit_effect_serial,
             "player_hit_effect_pos": self.point_to_list(self.player_hit_effect_pos),
             "player_hit_effect_hpr": self.hpr_to_list(self.player_hit_effect_hpr),
@@ -2209,6 +2493,8 @@ class MyApp(ShowBase):
 
         self.waiting_to_start = bool(snapshot.get("waiting_to_start", False))
         self.game_over = bool(snapshot.get("game_over", False))
+        self.enemy_shooting_suspended = bool(snapshot.get("enemy_shooting_suspended", self.enemy_shooting_suspended))
+        self.update_network_client_audio_state(self.waiting_to_start, self.game_over)
         self.network_connected_tanks = snapshot.get("connected_tanks", [])
         self.player_lives = int(snapshot.get("player_lives", self.player_lives))
         for tank_id, tank_state in snapshot.get("tanks", {}).items():
@@ -2219,6 +2505,15 @@ class MyApp(ShowBase):
         if not first_snapshot and tank_hit_serial > self.network_tank_hit_event_serial:
             self.play_tank_hit_event(snapshot.get("tank_hit_event", {}))
         self.network_tank_hit_event_serial = max(self.network_tank_hit_event_serial, tank_hit_serial)
+        self.update_network_snapshot_shot_audio(snapshot.get("shots", {}))
+
+        player_damage_serial = int(snapshot.get("player_damage_event_serial", 0))
+        if (
+                NETWORK_TANK_ID == "0" and
+                not first_snapshot and
+                player_damage_serial > self.network_player_damage_event_serial):
+            self.trigger_player_hit_feedback()
+        self.network_player_damage_event_serial = max(self.network_player_damage_event_serial, player_damage_serial)
 
         player_hit_serial = int(snapshot.get("player_hit_effect_serial", 0))
         if (
@@ -2227,27 +2522,22 @@ class MyApp(ShowBase):
                 player_hit_serial > self.network_player_hit_effect_serial):
             effect_pos = Point3(*snapshot.get("player_hit_effect_pos", [0, 0, 0]))
             effect_hpr = Point3(*snapshot.get("player_hit_effect_hpr", [0, 0, 0]))
-            Sequence(
-                Wait(NETWORK_EFFECT_DELAY),
-                Func(self.play_player_tank_hit_effect, effect_pos, effect_hpr)
-            ).start()
+            if self.game_over:
+                Sequence(
+                    Wait(NETWORK_EFFECT_DELAY),
+                    Func(self.play_player_tank_hit_effect, effect_pos, effect_hpr)
+                ).start()
         self.network_player_hit_effect_serial = max(self.network_player_hit_effect_serial, player_hit_serial)
-        self.startTextObject.text = "REMOTE VIEW\nTANK {}\n{}".format(
-            NETWORK_TANK_ID,
-            self.network_client_mode_label()
-        )
-        if self.waiting_to_start:
-            self.startTextObject.text = "REMOTE CONTROLLER\nTANK {}\nHOST WAITING".format(NETWORK_TANK_ID)
-            self.startTextObject.show()
-        else:
-            self.startTextObject.hide()
+        self.update_network_client_start_prompt()
+        self.update_network_client_game_over_prompt()
 
         self.network_snapshot_targets = {
             "tanks": snapshot.get("tanks", {}),
             "shots": snapshot.get("shots", {})
         }
         self.network_snapshot_history.append({
-            "time": float(snapshot.get("time", ClockObject.getGlobalClock().getFrameTime())),
+            "time": ClockObject.getGlobalClock().getFrameTime(),
+            "snapshot_time": float(snapshot.get("time", 0.0)),
             "targets": self.network_snapshot_targets
         })
         self.network_snapshot_history = self.network_snapshot_history[-8:]
@@ -2255,6 +2545,47 @@ class MyApp(ShowBase):
         if first_snapshot:
             self.snap_network_snapshot_render()
         self.update_start_screen_presentation()
+
+    def update_network_client_game_over_prompt(self):
+        if not hasattr(self, "gameOverTextObject"):
+            return
+        if self.game_over:
+            if NETWORK_TANK_ID == "0":
+                self.gameOverTextObject.text = "GAME OVER\nR TO RESTART"
+            else:
+                self.gameOverTextObject.text = "GAME OVER"
+            self.gameOverTextObject.show()
+        else:
+            self.gameOverTextObject.hide()
+
+    def update_network_client_start_prompt(self):
+        if not self.is_network_client_controller():
+            return
+        if not hasattr(self, "startTextObject"):
+            return
+        if self.waiting_to_start:
+            if self.network_join_accepted:
+                self.startTextObject.text = "TANK CLIENT\nTANK {}\nENTER TO START".format(NETWORK_TANK_ID)
+            else:
+                self.startTextObject.text = "TANK CLIENT\nTANK {}\n{}".format(
+                    NETWORK_TANK_ID,
+                    self.network_client_mode_label()
+                )
+            self.startTextObject.show()
+        else:
+            self.startTextObject.hide()
+
+    def update_network_snapshot_shot_audio(self, shot_states):
+        if self.waiting_to_start:
+            return
+
+        for tank_id, state in shot_states.items():
+            visible = not state.get("hidden", True)
+            previously_visible = getattr(self, "network_snapshot_shot_visible", {}).get(tank_id, False)
+            if visible and not previously_visible:
+                sound = self.mainShot_snd if tank_id == self.current_view_tank_id() else self.enemyShot_snd
+                sound.play()
+            self.network_snapshot_shot_visible[tank_id] = visible
 
     def snapshot_state_point(self, state, key):
         return Point3(*state[key])
@@ -2278,7 +2609,7 @@ class MyApp(ShowBase):
         )
 
     def lerp_snapshot_angle(self, start, end, alpha):
-        return start + signed_angular_delta_degrees(start, end) * alpha
+        return start + signed_angular_delta_degrees(end, start) * alpha
 
     def interpolate_network_snapshot_state(self, before, after, alpha):
         if before is None:
@@ -2320,11 +2651,14 @@ class MyApp(ShowBase):
         return targets
 
     def interpolated_network_snapshot_targets(self):
+        if not getattr(self, "network_interpolation_enabled", True):
+            return self.network_snapshot_targets
+
         history = getattr(self, "network_snapshot_history", [])
         if len(history) < 2:
             return self.network_snapshot_targets
 
-        render_time = history[-1]["time"] - NETWORK_RENDER_DELAY
+        render_time = ClockObject.getGlobalClock().getFrameTime() - NETWORK_RENDER_DELAY
         before = history[0]
         after = history[-1]
         for index in range(len(history) - 1):
@@ -2357,29 +2691,31 @@ class MyApp(ShowBase):
             body_np.hide()
             return
 
+        if tank_id == self.current_view_tank_id():
+            body_np.hide(MAIN_CAMERA_MASK | AUX_CAMERA_MASK)
+            return
+
         if tank_id == "0":
             if getattr(self, "player_tank_visual_hidden_for_effect", False):
                 body_np.hide()
-            elif self.is_network_client_controller() and NETWORK_TANK_ID != "0":
-                body_np.show(MAIN_CAMERA_MASK)
             else:
-                body_np.hide(MAIN_CAMERA_MASK)
+                body_np.show(MAIN_CAMERA_MASK | AUX_CAMERA_MASK)
             return
 
-        if tank_id == NETWORK_TANK_ID:
-            body_np.hide(MAIN_CAMERA_MASK)
-        else:
-            body_np.show(MAIN_CAMERA_MASK)
+        body_np.show(MAIN_CAMERA_MASK | AUX_CAMERA_MASK)
 
     def set_tank_shot_visibility_from_snapshot(self, tank_id, state):
         shot_np = self.tank_shot_node(tank_id)
-        if state.get("hidden", True):
+        visible = not state.get("hidden", True)
+
+        if not visible:
             shot_np.hide()
         else:
             shot_np.show()
 
     def set_tank_body_from_snapshot(self, tank_id, state):
-        self.set_node_to_snapshot(self.tank_body_node(tank_id), state)
+        node = self.tank_body_node(tank_id)
+        self.set_node_to_snapshot(node, state)
 
     def set_tank_shot_from_snapshot(self, tank_id, state):
         shot_np = self.tank_shot_node(tank_id)
@@ -2410,6 +2746,8 @@ class MyApp(ShowBase):
             self.camera.setPos(render, self.snapshot_state_point(view_state, "pos"))
             self.camera.setHpr(render, *self.snapshot_state_hpr(view_state))
             self.player_barrel_tilt = float(view_state.get("barrel_tilt", 0.0))
+            if NETWORK_TANK_ID == "0":
+                self.apply_player_hit_camera_shake()
 
         for tank_id in self.tank_ids_for_state():
             state = tank_states.get(tank_id)
@@ -2431,6 +2769,8 @@ class MyApp(ShowBase):
         if view_state:
             self.set_node_to_snapshot(self.camera, view_state)
             self.player_barrel_tilt = float(view_state.get("barrel_tilt", 0.0))
+            if NETWORK_TANK_ID == "0":
+                self.apply_player_hit_camera_shake()
 
         for tank_id in self.tank_ids_for_state():
             state = tank_states.get(tank_id)
@@ -2490,6 +2830,15 @@ class MyApp(ShowBase):
             self.set_bloom_enabled(False)
             return
         self.set_bloom_enabled(not self.bloom_enabled)
+
+    def toggle_network_interpolation(self):
+        if not self.is_network_client_controller():
+            return
+        self.network_interpolation_enabled = not getattr(self, "network_interpolation_enabled", True)
+        self.network_snapshot_history = []
+        if self.network_snapshot_received:
+            self.snap_network_snapshot_render()
+        print("Network smoothing {}".format("ON" if self.network_interpolation_enabled else "OFF"))
 
     def arm_investigation(self, shooter_id, shot_start, shot_end, shooter_pos=None, shooter_hpr=None):
         if shooter_id in tanks_list:
@@ -2724,6 +3073,7 @@ class MyApp(ShowBase):
         self.mainShot_snd.stop()
         self.enemyShot_snd.stop()
         self.enemyTankExplosion_snd.stop()
+        self.playerHit_snd.stop()
 
     def resume_sounds_after_investigation(self):
         self.investigation_snd.stop()
@@ -2819,17 +3169,16 @@ class MyApp(ShowBase):
             tanks_dict[shooter_id].get("shot_shooter_hpr")
         )
         self.enemy_reset_shot(shooter_id)
-        self.set_tank_alive("0", False)
-        self.set_tank_reconstituting("0", True)
-        self.record_player_tank_hit_effect(shooter_id, shot_start, shot_end)
-
         self.last_player_hit_time = now
         self.set_tank_hit_cooldown("0", PLAYER_HIT_COOLDOWN)
         self.set_tank_lives("0", max(0, self.tank_lives("0") - 1))
-        self.hit_flash_alpha = 0.5
+        self.record_player_damage_feedback()
         self.update_lives_hud()
 
         if self.tank_lives("0") <= 0:
+            self.set_tank_alive("0", False)
+            self.set_tank_reconstituting("0", True)
+            self.record_player_tank_hit_effect(shooter_id, shot_start, shot_end)
             self.make_investigation_persistent_for_game_over()
             self.end_game()
 
@@ -2851,16 +3200,16 @@ class MyApp(ShowBase):
             tanks_dict[shooter_id].get("shot_shooter_hpr")
         )
 
-        self.set_tank_alive("0", False)
-        self.set_tank_reconstituting("0", True)
-        self.record_player_tank_hit_effect(shooter_id, shot_start, shot_end)
         self.last_player_hit_time = now
         self.set_tank_hit_cooldown("0", PLAYER_HIT_COOLDOWN)
         self.set_tank_lives("0", max(0, self.tank_lives("0") - 1))
-        self.hit_flash_alpha = 0.5
+        self.record_player_damage_feedback()
         self.update_lives_hud()
 
         if self.tank_lives("0") <= 0:
+            self.set_tank_alive("0", False)
+            self.set_tank_reconstituting("0", True)
+            self.record_player_tank_hit_effect(shooter_id, shot_start, shot_end)
             self.make_investigation_persistent_for_game_over()
             self.end_game()
 
@@ -2913,6 +3262,9 @@ class MyApp(ShowBase):
     def play_tank_hit_effect(self, tank_id, pos, hpr):
         if not hasattr(self, "tank_fragment_data"):
             return
+
+        if tank_id != "0":
+            self.enemyTankExplosion_snd.play()
 
         if tank_id == "0":
             self.hide_player_tank_for_hit_effect()
@@ -2968,10 +3320,7 @@ class MyApp(ShowBase):
             self.set_tank_alive("0", True)
             self.set_tank_reconstituting("0", False)
         self.player_tank_visual.show()
-        if self.is_network_client_controller():
-            self.player_tank_visual.show(MAIN_CAMERA_MASK)
-        else:
-            self.player_tank_visual.hide(MAIN_CAMERA_MASK)
+        self.update_player_tank_visual()
 
     def end_game(self):
         self.game_over = True
@@ -2993,10 +3342,15 @@ class MyApp(ShowBase):
 
     def start_game(self):
         if self.is_network_client_controller():
-            self.update_network_client_presentation()
+            if self.network_bridge is not None:
+                self.network_bridge.send_client_start()
             return
 
         if not self.waiting_to_start:
+            return
+
+        if self.is_network_server_authority() and not self.server_required_clients_connected():
+            self.update_network_server_presentation()
             return
 
         self.waiting_to_start = False
@@ -3005,14 +3359,14 @@ class MyApp(ShowBase):
         self.set_player_camera_on_terrain()
         self.set_tank_alive("0", True)
         self.set_tank_reconstituting("0", False)
-        self.set_tank_lives("0", PLAYER_MAX_LIVES)
+        self.set_tank_lives("0", self.tank_max_lives("0"))
         self.set_tank_hit_cooldown("0", 0)
         self.player_barrel_tilt = 0.0
         for t in tanks_list:
             tanks_dict[t]["barrel_tilt"] = 0.0
             self.set_tank_alive(t, True)
             self.set_tank_reconstituting(t, False)
-            self.set_tank_lives(t, PLAYER_MAX_LIVES)
+            self.set_tank_lives(t, self.tank_max_lives(t))
             self.set_tank_hit_cooldown(t, 0)
         self.startTextObject.hide()
         for text_object in getattr(self, "environmentNameTextObjects", []):
@@ -3035,10 +3389,16 @@ class MyApp(ShowBase):
                 self.obstacle_group.show()
 
         if hasattr(self, "radar_np"):
-            if waiting or client_controller or server_authority:
-                self.radar_np.hide()
-            else:
+            radar_visible = (
+                not server_authority and
+                not waiting and
+                (not client_controller or client_snapshot) and
+                not client_low_render
+            )
+            if radar_visible:
                 self.radar_np.show()
+            else:
+                self.radar_np.hide()
 
         if hasattr(self, "sight_clear_np"):
             sight_visible = not server_authority and not waiting and (not client_controller or client_snapshot)
@@ -3053,7 +3413,9 @@ class MyApp(ShowBase):
 
         self.set_auxiliary_views_visible(not server_authority and ((not waiting and not client_controller) or client_snapshot) and not client_low_render)
         self.set_drone_view_visible(not server_authority and not waiting and not client_controller and not client_low_render)
+        self.set_recon_drone_world_visible(not server_authority and not client_low_render)
         self.set_environment_preview_visible(waiting and not client_controller and not server_authority)
+        self.set_server_lobby_visible(waiting and server_authority)
 
     def set_auxiliary_views_visible(self, visible):
         if hasattr(self, "panorama_overlay_region"):
@@ -3078,6 +3440,21 @@ class MyApp(ShowBase):
             node = getattr(self, node_name)
             if visible:
                 node.show()
+            else:
+                node.hide()
+
+    def set_recon_drone_world_visible(self, visible):
+        for node_name in ("recon_drone_np", "drone_home_marker_np"):
+            if not hasattr(self, node_name):
+                continue
+            node = getattr(self, node_name)
+            if visible:
+                node.show()
+                if node_name == "recon_drone_np":
+                    node.hide(DRONE_CAMERA_MASK)
+                else:
+                    node.hide(MAIN_CAMERA_MASK | AUX_CAMERA_MASK)
+                    node.show(DRONE_CAMERA_MASK)
             else:
                 node.hide()
 
@@ -3195,6 +3572,11 @@ class MyApp(ShowBase):
         self.next_environment()
 
     def restart_game(self):
+        if self.is_network_client_controller():
+            if self.game_over and self.network_bridge is not None:
+                self.network_bridge.send_client_restart()
+            return
+
         if not self.game_over:
             return
 
@@ -3210,9 +3592,13 @@ class MyApp(ShowBase):
         self.last_player_hit_time = -PLAYER_HIT_COOLDOWN
         self.set_tank_alive("0", True)
         self.set_tank_reconstituting("0", False)
-        self.set_tank_lives("0", PLAYER_MAX_LIVES)
+        self.set_tank_lives("0", self.tank_max_lives("0"))
         self.set_tank_hit_cooldown("0", 0)
         self.hit_flash_alpha = 0
+        self.player_hit_shake_until = 0
+        self.player_hit_shake_started_at = 0
+        self.player_damage_event_serial = 0
+        self.network_player_damage_event_serial = 0
         self.player_tank_visual_hidden_for_effect = False
         self.gameOverTextObject.hide()
         self.startTextObject.hide()
@@ -3227,11 +3613,11 @@ class MyApp(ShowBase):
         self.camera.setHpr(0, 0, 0)
         self.set_player_camera_on_terrain()
         self.player_tank_visual.show()
-        self.player_tank_visual.hide(MAIN_CAMERA_MASK)
+        self.update_player_tank_visual()
         self.player_barrel_tilt = 0.0
         for t in tanks_list:
             tanks_dict[t]["barrel_tilt"] = 0.0
-            self.set_tank_lives(t, PLAYER_MAX_LIVES)
+            self.set_tank_lives(t, self.tank_max_lives(t))
         self.update_barrel_aim_marker()
         self.reset_shot()
         for t in tanks_list:
@@ -3243,16 +3629,14 @@ class MyApp(ShowBase):
             tanks_dict[t]["attack_ready_time"] = 0
             self.set_tank_alive(t, True)
             self.set_tank_reconstituting(t, False)
-            self.set_tank_lives(t, PLAYER_MAX_LIVES)
+            self.set_tank_lives(t, self.tank_max_lives(t))
             self.set_tank_hit_cooldown(t, 0)
             self.enemy_reset_shot(t)
         self.update_lives_hud()
 
     def updatePlayerFeedbackTask(self, task):
-        if self.is_network_client_controller():
-            return Task.cont
-
-        self.update_investigation_prompt()
+        if not self.is_network_client_controller():
+            self.update_investigation_prompt()
 
         if self.investigation_mode:
             return Task.cont
@@ -3268,6 +3652,10 @@ class MyApp(ShowBase):
         return Task.cont
 
     def render_mountains(self):
+        if hasattr(self, "mountain_group"):
+            self.mountain_group.removeNode()
+        self.mountain_group = self.render.attachNewNode("Mountains")
+
         with open('models/digitization01_cleaned_02.json', "r") as f:
             data = json.load(f)
 
@@ -3281,7 +3669,7 @@ class MyApp(ShowBase):
         scale = 7000
         for i in range(n):
             angleRadians = 2 * pi / n * i
-            placeholder = self.render.attachNewNode("MountainLine-Placeholder")
+            placeholder = self.mountain_group.attachNewNode("MountainLine-Placeholder")
             placeholder.setH(placeholder, 360 / n * i)
             # placeholder.setPos(sin(angleRadians), cos(angleRadians), 0)
             placeholder.setScale(scale, scale, scale / n / 2.5)
@@ -3583,14 +3971,18 @@ class MyApp(ShowBase):
         self.last_player_hit_time = -PLAYER_HIT_COOLDOWN
         self.set_tank_alive("0", True)
         self.set_tank_reconstituting("0", False)
-        self.set_tank_lives("0", PLAYER_MAX_LIVES)
+        self.set_tank_lives("0", self.tank_max_lives("0"))
         self.set_tank_hit_cooldown("0", 0)
         for t in tanks_list:
             self.set_tank_alive(t, True)
             self.set_tank_reconstituting(t, False)
-            self.set_tank_lives(t, PLAYER_MAX_LIVES)
+            self.set_tank_lives(t, self.tank_max_lives(t))
             self.set_tank_hit_cooldown(t, 0)
         self.hit_flash_alpha = 0
+        self.player_hit_shake_until = 0
+        self.player_hit_shake_started_at = 0
+        self.player_damage_event_serial = 0
+        self.network_player_damage_event_serial = 0
         self.investigation_mode = False
         self.investigation_available_until = 0
         self.last_player_hit_event = None
@@ -3654,6 +4046,7 @@ class MyApp(ShowBase):
                                             align=TextNode.ACenter, scale=(0.075, 0.1),
                                             fg=(0.4, 1.0, 0.4, 1), mayChange=True)
         self.startTextObject.reparentTo(aspect2d)
+        self.render_server_lobby_overlay()
 
         self.environmentNameTextObjects = []
         for offset_x, offset_z in ((0, 0), (0.003, 0), (-0.003, 0), (0, 0.003)):
@@ -3713,9 +4106,133 @@ class MyApp(ShowBase):
         if not hasattr(self, "livesTableRoot"):
             return
         if self.is_network_server_authority() and getattr(self, "waiting_to_start", False):
-            self.livesTableRoot.setPos(-0.2, 0, -0.02)
+            self.livesTableRoot.hide()
         else:
+            self.livesTableRoot.show()
             self.livesTableRoot.setPos(-1.18, 0, -0.62)
+
+    def render_server_lobby_overlay(self):
+        self.serverLobbyDimNp = render2d.attachNewNode("ServerLobbyDim")
+        dim_card = CardMaker("server-lobby-dim-card")
+        dim_card.setFrameFullscreenQuad()
+        dim_np = self.serverLobbyDimNp.attachNewNode(dim_card.generate())
+        dim_np.setTransparency(TransparencyAttrib.MAlpha)
+        dim_np.setColorScale(0, 0, 0, 0.58)
+        self.serverLobbyDimNp.setBin("fixed", 5)
+        self.serverLobbyDimNp.setDepthWrite(False)
+
+        self.serverLobbyRoot = aspect2d.attachNewNode("ServerLobby")
+        self.serverLobbyRoot.setBin("fixed", 20)
+        panel = CardMaker("server-lobby-panel")
+        panel.setFrame(-0.82, 0.82, -0.44, 0.44)
+        panel_np = self.serverLobbyRoot.attachNewNode(panel.generate())
+        panel_np.setTransparency(TransparencyAttrib.MAlpha)
+        panel_np.setColorScale(0.0, 0.035, 0.015, 0.88)
+
+        frame = LineSegs("server-lobby-frame")
+        frame.setThickness(2)
+        frame.moveTo(-0.82, 0, -0.44)
+        frame.drawTo(0.82, 0, -0.44)
+        frame.drawTo(0.82, 0, 0.44)
+        frame.drawTo(-0.82, 0, 0.44)
+        frame.drawTo(-0.82, 0, -0.44)
+        frame.moveTo(-0.70, 0, 0.14)
+        frame.drawTo(0.70, 0, 0.14)
+        frame.moveTo(-0.70, 0, -0.08)
+        frame.drawTo(0.70, 0, -0.08)
+        frame_np = self.serverLobbyRoot.attachNewNode(frame.create())
+        frame_np.setColorScale(0.0, 0.62, 0.22, 1)
+
+        self.serverLobbyTitleObject = OnscreenText(
+            text="BATTLEZONE SERVER", pos=(0, 0.32), align=TextNode.ACenter,
+            scale=(0.052, 0.075), fg=(0.5, 1.0, 0.55, 1), mayChange=False
+        )
+        self.serverLobbySubtitleObject = OnscreenText(
+            text="NETWORK LOBBY", pos=(0, 0.23), align=TextNode.ACenter,
+            scale=(0.026, 0.04), fg=(0.12, 0.75, 0.28, 1), mayChange=False
+        )
+        self.serverLobbyStatusObject = OnscreenText(
+            text="", pos=(-0.68, 0.08), align=TextNode.ALeft,
+            scale=(0.029, 0.043), fg=(0.34, 1.0, 0.42, 1), mayChange=True
+        )
+        self.serverLobbyPromptObject = OnscreenText(
+            text="", pos=(0, -0.34), align=TextNode.ACenter,
+            scale=(0.034, 0.05), fg=(0.55, 1.0, 0.55, 1), mayChange=True
+        )
+        for obj in (
+            self.serverLobbyTitleObject,
+            self.serverLobbySubtitleObject,
+            self.serverLobbyStatusObject,
+            self.serverLobbyPromptObject,
+        ):
+            obj.reparentTo(self.serverLobbyRoot)
+
+        self.serverLobbyHeaderObjects = []
+        headers = (("TANK", -0.58, TextNode.ALeft), ("CTRL", -0.14, TextNode.ALeft),
+                   ("LIVES", 0.22, TextNode.ARight), ("LINK", 0.58, TextNode.ARight))
+        for text, x, align in headers:
+            header = OnscreenText(
+                text=text, pos=(x, 0.02), align=align,
+                scale=(0.024, 0.036), fg=(0.16, 0.78, 0.3, 1), mayChange=False
+            )
+            header.reparentTo(self.serverLobbyRoot)
+            self.serverLobbyHeaderObjects.append(header)
+
+        self.serverLobbyRowObjects = []
+        for row_index, tank_id in enumerate(self.tank_ids_for_state()):
+            z = -0.055 - row_index * 0.07
+            row = []
+            row_specs = ((-0.58, TextNode.ALeft), (-0.14, TextNode.ALeft),
+                         (0.22, TextNode.ARight), (0.58, TextNode.ARight))
+            for x, align in row_specs:
+                text_obj = OnscreenText(
+                    text="", pos=(x, z), align=align,
+                    scale=(0.031, 0.047), fg=(0.42, 1.0, 0.42, 1), mayChange=True
+                )
+                text_obj.reparentTo(self.serverLobbyRoot)
+                row.append(text_obj)
+            self.serverLobbyRowObjects.append(row)
+
+        self.set_server_lobby_visible(False)
+
+    def set_server_lobby_visible(self, visible):
+        if not hasattr(self, "serverLobbyRoot"):
+            return
+        if visible:
+            self.serverLobbyRoot.show()
+            self.serverLobbyDimNp.show()
+        else:
+            self.serverLobbyRoot.hide()
+            self.serverLobbyDimNp.hide()
+
+    def update_server_lobby_overlay(self, connected_tanks=None, controller_types=None):
+        if not hasattr(self, "serverLobbyRoot"):
+            return
+        rows = self.server_lobby_rows(connected_tanks, controller_types)
+        expected_tanks = self.server_lobby_expected_client_tanks()
+        connected = len(expected_tanks.intersection(set(connected_tanks or [])))
+        expected_clients = len(expected_tanks)
+        client_word = "CLIENT" if expected_clients == 1 else "CLIENTS"
+        self.serverLobbyStatusObject.text = "{} / {} {} CONNECTED".format(
+            connected,
+            expected_clients,
+            client_word
+        )
+        if connected >= expected_clients:
+            self.serverLobbyPromptObject.text = "CLIENT READY TO START"
+            self.serverLobbyPromptObject.setFg((0.55, 1.0, 0.55, 1))
+        else:
+            self.serverLobbyPromptObject.text = "WAITING FOR TANK 0"
+            self.serverLobbyPromptObject.setFg((0.16, 0.72, 0.28, 1))
+        for row_index, row_values in enumerate(rows):
+            row_objects = self.serverLobbyRowObjects[row_index]
+            tank_id, controller, lives_text, link_state = row_values
+            display_values = ("TANK {}".format(tank_id), controller, lives_text, link_state)
+            linked = link_state != "WAITING"
+            row_color = (0.42, 1.0, 0.42, 1) if linked else (0.12, 0.55, 0.22, 1)
+            for text_obj, value in zip(row_objects, display_values):
+                text_obj.text = value
+                text_obj.setFg(row_color)
 
     def render_tank_hud_labels(self):
         self.tank_hud_label_lines = {}
@@ -3744,6 +4261,10 @@ class MyApp(ShowBase):
     def tank_hud_label_text_value(self, t):
         if not TACTICAL_AI_DEBUG_LABELS:
             return t
+        if self.is_network_client_controller():
+            tank_state = self.network_snapshot_targets.get("tanks", {}).get(t, {})
+            debug_state = tank_state.get("debug_state", "")
+            return "{}:{}".format(t, debug_state) if debug_state else t
         controller = getattr(self, "ai_tank_controllers", {}).get(t)
         if controller is None:
             return t
@@ -4049,6 +4570,7 @@ class MyApp(ShowBase):
             self.mainShot_snd,
             self.enemyShot_snd,
             self.enemyTankExplosion_snd,
+            self.playerHit_snd,
             self.gameOver_snd,
             self.investigation_snd,
         ):
@@ -4255,9 +4777,11 @@ class MyApp(ShowBase):
 
     def updateReconDroneTask(self, task):
         if self.is_network_server_authority():
+            self.set_recon_drone_world_visible(False)
             return Task.cont
 
         if self.is_network_client_low_render():
+            self.set_recon_drone_world_visible(False)
             return Task.cont
 
         dt = min(ClockObject.getGlobalClock().getDt(), 0.05)
@@ -4777,8 +5301,11 @@ class MyApp(ShowBase):
     def build_tank_observation(self, tank_id):
         tank_np = self.tank_body_node(tank_id)
         tank_pos = Point3(tank_np.getPos(render))
-        player_pos = self.tank_body_pos("0")
-        player_body_pos = self.player_tank_body_target()
+        target_tank_id = "0"
+        if tank_id == "0":
+            target_tank_id = sorted(tanks_list, key=lambda value: int(value))[0] if tanks_list else "0"
+        player_pos = self.tank_body_pos(target_tank_id)
+        player_body_pos = self.tank_body_target(target_tank_id)
         player_dx = player_pos[0] - tank_pos[0]
         player_dy = player_pos[1] - tank_pos[1]
         distance = math.sqrt(player_dx ** 2 + player_dy ** 2)
@@ -4974,6 +5501,11 @@ class MyApp(ShowBase):
         )
 
         if tank_id == "0":
+            if command.desired_world_pos is not None:
+                self.apply_autonomous_player_tank_command(command, dt)
+                if command.fire:
+                    self.shoot()
+                return
             self.apply_player_tank_command(command, dt)
             return
 
@@ -5042,6 +5574,60 @@ class MyApp(ShowBase):
 
     def player_tank_body_target(self):
         return self.tank_body_target("0")
+
+    def apply_autonomous_player_tank_command(self, command, dt):
+        if command.desired_world_pos is None:
+            return
+
+        self.apply_barrel_tilt_command("0", command, dt)
+
+        target_world = self.resolve_obstacle_position(
+            command.desired_world_pos,
+            self.tank_avatars["0"].collision_radius
+        )
+        current_world = Point3(self.camera.getPos(render))
+        to_target = target_world - current_world
+        distance = math.sqrt(to_target[0] ** 2 + to_target[1] ** 2)
+        max_step = AUTONOMOUS_TANK_MAX_SPEED * dt
+        current_heading = self.camera.getH(render)
+        runtime = self.tank_runtime_state("0")
+        target_heading = command.desired_heading
+        if target_heading is not None:
+            target_heading = 90 - target_heading
+        else:
+            target_heading = current_heading
+
+        if distance > 0.001:
+            target_heading = math.degrees(math.atan2(to_target[0], to_target[1]))
+
+        heading = self.approach_angle(
+            current_heading,
+            target_heading,
+            ENEMY_TURN_ANG_VEL * dt
+        )
+        heading_error = abs(signed_angular_delta_degrees(target_heading, heading))
+        alignment = max(
+            AUTONOMOUS_TANK_TURNING_SPEED_FACTOR,
+            math.cos(math.radians(heading_error))
+        )
+        move_step = min(max_step * alignment, distance) if distance > 0.001 else 0
+        heading_radians = math.radians(heading)
+        candidate_world = Point3(
+            current_world[0] + math.sin(heading_radians) * move_step,
+            current_world[1] + math.cos(heading_radians) * move_step,
+            current_world[2]
+        )
+        avoided_world = self.resolve_obstacle_position(
+            candidate_world,
+            self.tank_avatars["0"].collision_radius
+        )
+        self.camera.setPos(render, self.terrain_position(avoided_world, PLAYER_CAMERA_HEIGHT))
+        self.camera.setHpr(render, *self.terrain_surface_hpr(
+            self.camera.getX(render),
+            self.camera.getY(render),
+            heading,
+            "y"
+        ))
 
     def apply_direct_tank_command(self, t, command, dt):
         if not tanks_dict[t]["move"] or self.tank_avatars[t].is_hidden():
@@ -5229,12 +5815,20 @@ class MyApp(ShowBase):
 
     def toggle_enemy_shooting(self):
         if self.is_network_client_controller():
+            if NETWORK_TANK_ID != "0":
+                return
+            self.set_enemy_shooting_suspended(not self.enemy_shooting_suspended)
+            if self.network_bridge is not None:
+                self.network_bridge.send_client_enemy_fire(self.enemy_shooting_suspended)
             return
 
         if self.waiting_to_start:
             return
 
-        self.enemy_shooting_suspended = not self.enemy_shooting_suspended
+        self.set_enemy_shooting_suspended(not self.enemy_shooting_suspended)
+
+    def set_enemy_shooting_suspended(self, suspended):
+        self.enemy_shooting_suspended = bool(suspended)
 
     def shoot(self):
         if self.is_network_client_controller():
@@ -5274,7 +5868,13 @@ class MyApp(ShowBase):
         if self.is_network_server_authority():
             return Task.cont
 
-        if self.waiting_to_start or self.is_network_client_controller():
+        if self.waiting_to_start:
+            return Task.cont
+
+        if self.is_network_client_low_render():
+            return Task.cont
+
+        if self.is_network_client_controller() and not self.network_client_has_snapshot():
             return Task.cont
 
         if self.investigation_mode:
@@ -5369,6 +5969,8 @@ class MyApp(ShowBase):
             status_text += "\nNET CLIENT {}\nSERVER TANKS {}".format(NETWORK_TANK_ID, connected)
         if self.is_network_client_low_render():
             status_text += "\nCLIENT LOW RENDER"
+        if self.is_network_client_controller():
+            status_text += "\nZ SMOOTH " + ("ON" if self.network_interpolation_enabled else "OFF")
         self.textObject.text = status_text
 
         # mat = Mat4(self.camera.getMat())
