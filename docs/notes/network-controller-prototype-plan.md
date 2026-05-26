@@ -52,6 +52,7 @@ tank-client-1
 - Add simple join/leave status before introducing lobbies.
 - Expire clients that stop sending input/presence packets so stale local test windows do not remain connected.
 - Clients send `join` packets before input; the server replies with `join_ack` accepted/rejected state for the requested tank.
+- Clients send `leave` on clean window close so the server can release the tank immediately.
 
 ## Milestone 4: Publishable Transport
 

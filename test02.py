@@ -794,6 +794,7 @@ class UdpTankInputBridge:
             self.server_addr = (self.host, self.port)
 
     def close(self):
+        self.send_client_leave()
         self.socket.close()
 
     def status(self):
@@ -840,6 +841,9 @@ class UdpTankInputBridge:
             if message_type == "join":
                 self.handle_host_join(message, addr, task_time)
                 continue
+            if message_type == "leave":
+                self.handle_host_leave(message, addr)
+                continue
 
             if message_type != "input":
                 continue
@@ -883,6 +887,25 @@ class UdpTankInputBridge:
         self.client_join_status[tank_id] = "accepted"
         return True
 
+    def release_host_client_claim(self, tank_id, addr=None):
+        existing_addr = self.client_addrs.get(tank_id)
+        if existing_addr is None:
+            return False
+        if addr is not None and existing_addr != addr:
+            return False
+
+        self.client_addrs.pop(tank_id, None)
+        self.client_last_seen.pop(tank_id, None)
+        self.client_join_status.pop(tank_id, None)
+        self.app.submit_remote_tank_input(tank_id, throttle=0.0, turn=0.0, fire=False, barrel_tilt=0.0)
+        return True
+
+    def handle_host_leave(self, message, addr):
+        tank_id = str(message.get("tank_id", self.tank_id))
+        if tank_id not in network_tank_ids():
+            return
+        self.release_host_client_claim(tank_id, addr)
+
     def send_host_join_ack(self, addr, tank_id, accepted, reason):
         payload = {
             "type": "join_ack",
@@ -910,9 +933,7 @@ class UdpTankInputBridge:
             except OSError:
                 stale_tanks.append(tank_id)
         for tank_id in stale_tanks:
-            self.client_addrs.pop(tank_id, None)
-            self.client_last_seen.pop(tank_id, None)
-            self.client_join_status.pop(tank_id, None)
+            self.release_host_client_claim(tank_id)
 
     def expire_host_clients(self, task_time):
         stale_tanks = [
@@ -921,9 +942,7 @@ class UdpTankInputBridge:
             if task_time - last_seen > NETWORK_CLIENT_TIMEOUT
         ]
         for tank_id in stale_tanks:
-            self.client_addrs.pop(tank_id, None)
-            self.client_last_seen.pop(tank_id, None)
-            self.client_join_status.pop(tank_id, None)
+            self.release_host_client_claim(tank_id)
 
     def receive_client_packets(self, task_time):
         while True:
@@ -973,6 +992,23 @@ class UdpTankInputBridge:
             "tank_id": self.tank_id
         }
         self.socket.sendto(json.dumps(payload).encode("utf-8"), self.server_addr)
+
+    def send_client_leave(self):
+        if self.mode != "client" or not hasattr(self, "server_addr"):
+            return
+        if not self.join_accepted:
+            return
+
+        payload = {
+            "type": "leave",
+            "protocol": NETWORK_PROTOCOL_VERSION,
+            "tank_id": self.tank_id
+        }
+        try:
+            self.socket.sendto(json.dumps(payload).encode("utf-8"), self.server_addr)
+        except OSError:
+            pass
+        self.join_accepted = False
 
     def send_client_input(self, task_time):
         if not self.join_accepted:
@@ -3926,6 +3962,9 @@ class MyApp(ShowBase):
 
     def userExit(self):
         self.stop_all_game_sounds()
+        if self.network_bridge is not None:
+            self.network_bridge.close()
+            self.network_bridge = None
         ShowBase.userExit(self)
 
     def hide_bloom_from_auxiliary_views(self):
