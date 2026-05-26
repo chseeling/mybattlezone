@@ -829,7 +829,7 @@ class UdpTankInputBridge:
         while True:
             try:
                 payload, addr = self.socket.recvfrom(4096)
-            except BlockingIOError:
+            except (BlockingIOError, ConnectionResetError, OSError):
                 return
 
             try:
@@ -915,7 +915,10 @@ class UdpTankInputBridge:
             "reason": reason,
             "connected_tanks": self.connected_tank_ids()
         }
-        self.socket.sendto(json.dumps(payload).encode("utf-8"), addr)
+        try:
+            self.socket.sendto(json.dumps(payload).encode("utf-8"), addr)
+        except OSError:
+            pass
 
     def send_host_snapshot(self, task_time):
         if not self.client_addrs:
@@ -949,6 +952,9 @@ class UdpTankInputBridge:
             try:
                 payload, _addr = self.socket.recvfrom(16384)
             except BlockingIOError:
+                return
+            except (ConnectionResetError, OSError):
+                self.mark_client_disconnected()
                 return
 
             try:
@@ -991,7 +997,10 @@ class UdpTankInputBridge:
             "protocol": NETWORK_PROTOCOL_VERSION,
             "tank_id": self.tank_id
         }
-        self.socket.sendto(json.dumps(payload).encode("utf-8"), self.server_addr)
+        try:
+            self.socket.sendto(json.dumps(payload).encode("utf-8"), self.server_addr)
+        except OSError:
+            self.mark_client_disconnected()
 
     def send_client_leave(self):
         if self.mode != "client" or not hasattr(self, "server_addr"):
@@ -1026,7 +1035,21 @@ class UdpTankInputBridge:
             "fire": command.fire,
             "barrel_tilt": command.barrel_tilt
         }
-        self.socket.sendto(json.dumps(payload).encode("utf-8"), self.server_addr)
+        try:
+            self.socket.sendto(json.dumps(payload).encode("utf-8"), self.server_addr)
+        except OSError:
+            self.mark_client_disconnected()
+
+    def mark_client_disconnected(self):
+        if self.mode != "client":
+            return
+        self.join_accepted = False
+        self.join_rejected_reason = ""
+        self.app.network_join_accepted = False
+        self.app.network_join_rejected_reason = ""
+        self.app.network_snapshot_received = False
+        if self.app.is_network_client_controller():
+            self.app.update_network_client_presentation()
 
     def capture_local_input(self):
         if base.mouseWatcherNode is None:
