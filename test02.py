@@ -1736,7 +1736,7 @@ class MyApp(ShowBase):
         connected_text = "TANKS " + ",".join(connected_tanks) if connected_tanks else "WAITING"
         self.startTextObject.text = "BATTLEZONE SERVER\n{}\n{}\n{} CLIENT{}\nENTER TO START".format(
             connected_text,
-            self.tank_lives_text(),
+            self.tank_lives_table_text(),
             connected,
             "" if connected == 1 else "S"
         )
@@ -1929,13 +1929,22 @@ class MyApp(ShowBase):
         if tank_id == "0":
             self.player_lives = int(lives)
 
-    def tank_lives_text(self):
-        parts = []
+    def tank_display_name(self, tank_id):
+        return "Tank {}".format(tank_id)
+
+    def tank_lives_rows(self):
+        rows = []
         for tank_id in self.tank_ids_for_state():
             lives = self.tank_lives(tank_id)
             lives_text = "-" if lives is None else str(int(lives))
-            parts.append("T{}:{}".format(tank_id, lives_text))
-        return " ".join(parts)
+            rows.append((self.tank_display_name(tank_id), lives_text))
+        return rows
+
+    def tank_lives_table_text(self):
+        lines = ["TANKS       LIVES"]
+        for name, lives_text in self.tank_lives_rows():
+            lines.append("{:<10} {}".format(name, lives_text))
+        return "\n".join(lines)
 
     def set_tank_hit_cooldown(self, tank_id, seconds):
         self.tank_lifecycle_state(tank_id)["hit_cooldown_until"] = ClockObject.getGlobalClock().getFrameTime() + seconds
@@ -3597,8 +3606,8 @@ class MyApp(ShowBase):
         for t in tanks_list:
             tanks_dict[t]["barrel_tilt"] = 0.0
 
-        self.livesTextObject = OnscreenText(text="", pos=(-0.5, -0.78),
-                                            align=TextNode.ALeft, scale=(0.04, 0.06),
+        self.livesTextObject = OnscreenText(text="", pos=(-0.5, -0.74),
+                                            align=TextNode.ALeft, scale=(0.033, 0.048),
                                             fg=(0.4, 1.0, 0.4, 1), mayChange=True)
         self.livesTextObject.reparentTo(render2d)
 
@@ -3662,7 +3671,7 @@ class MyApp(ShowBase):
         self.update_lives_hud()
 
     def update_lives_hud(self):
-        self.livesTextObject.text = "LIVES " + self.tank_lives_text()
+        self.livesTextObject.text = self.tank_lives_table_text()
 
     def render_tank_hud_labels(self):
         self.tank_hud_label_lines = {}
@@ -5308,7 +5317,7 @@ class MyApp(ShowBase):
                     + str(int(vectH[0] - theta)) + "\nCTRL TANK " + self.human_control_tank_id + \
                     "\nENEMY FIRE" + enemy_fire_text + \
                     "\nBARREL " + str(int(self.player_barrel_tilt)) + \
-                    "\n" + self.tank_lives_text()
+                    "\n" + self.tank_lives_table_text()
         if self.network_bridge is not None:
             status_text += "\n" + self.network_bridge.status()
         elif self.is_network_client_controller():
