@@ -1542,7 +1542,7 @@ class MyApp(ShowBase):
         #
         self.tank_round.append(render.attachNewNode("tank-round"))
         np_round.instanceTo(self.tank_round[0])
-        # self.tank_round[0].hide()
+        self.tank_round[0].hide()
         self.tank_round[0].setColorScale(0.3, 0.3, 1.0, 1.0)
         self.tank_round[0].setPos(0, PLAYER_SHOT_START_Y, PLAYER_SHOT_START_Z - 10)
         self.tank_round[0].setHpr(self.tank_round[0], 0, 90, 0)
@@ -2580,12 +2580,12 @@ class MyApp(ShowBase):
             return
 
         for tank_id, state in shot_states.items():
-            visible = not state.get("hidden", True)
-            previously_visible = getattr(self, "network_snapshot_shot_visible", {}).get(tank_id, False)
-            if visible and not previously_visible:
+            shooting = bool(state.get("shooting", False))
+            previously_shooting = getattr(self, "network_snapshot_shot_visible", {}).get(tank_id, False)
+            if shooting and not previously_shooting:
                 sound = self.mainShot_snd if tank_id == self.current_view_tank_id() else self.enemyShot_snd
                 sound.play()
-            self.network_snapshot_shot_visible[tank_id] = visible
+            self.network_snapshot_shot_visible[tank_id] = shooting
 
     def snapshot_state_point(self, state, key):
         return Point3(*state[key])
@@ -3362,12 +3362,14 @@ class MyApp(ShowBase):
         self.set_tank_lives("0", self.tank_max_lives("0"))
         self.set_tank_hit_cooldown("0", 0)
         self.player_barrel_tilt = 0.0
+        self.reset_tank_shot("0")
         for t in tanks_list:
             tanks_dict[t]["barrel_tilt"] = 0.0
             self.set_tank_alive(t, True)
             self.set_tank_reconstituting(t, False)
             self.set_tank_lives(t, self.tank_max_lives(t))
             self.set_tank_hit_cooldown(t, 0)
+            self.enemy_reset_shot(t)
         self.startTextObject.hide()
         for text_object in getattr(self, "environmentNameTextObjects", []):
             text_object.hide()
