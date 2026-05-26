@@ -1235,6 +1235,9 @@ class MyApp(ShowBase):
         self.player_hit_effect_pos = Point3(0, 0, 0)
         self.player_hit_effect_hpr = Point3(0, 0, 0)
         self.network_player_hit_effect_serial = 0
+        self.tank_hit_event_serial = 0
+        self.last_tank_hit_event = {}
+        self.network_tank_hit_event_serial = 0
         self.player_tank_visual_hidden_for_effect = False
 
         # render enemy tank round
@@ -1931,6 +1934,8 @@ class MyApp(ShowBase):
             "player_hit_effect_serial": self.player_hit_effect_serial,
             "player_hit_effect_pos": self.point_to_list(self.player_hit_effect_pos),
             "player_hit_effect_hpr": self.hpr_to_list(self.player_hit_effect_hpr),
+            "tank_hit_event_serial": self.tank_hit_event_serial,
+            "tank_hit_event": self.last_tank_hit_event,
             "tanks": {},
             "shots": {}
         }
@@ -1961,8 +1966,16 @@ class MyApp(ShowBase):
         if tank0_state.get("lives") is not None:
             self.set_tank_lives("0", int(tank0_state.get("lives", self.player_lives)))
         self.update_lives_hud()
+        tank_hit_serial = int(snapshot.get("tank_hit_event_serial", 0))
+        if not first_snapshot and tank_hit_serial > self.network_tank_hit_event_serial:
+            self.play_tank_hit_event(snapshot.get("tank_hit_event", {}))
+        self.network_tank_hit_event_serial = max(self.network_tank_hit_event_serial, tank_hit_serial)
+
         player_hit_serial = int(snapshot.get("player_hit_effect_serial", 0))
-        if not first_snapshot and player_hit_serial > self.network_player_hit_effect_serial:
+        if (
+                tank_hit_serial <= 0 and
+                not first_snapshot and
+                player_hit_serial > self.network_player_hit_effect_serial):
             effect_pos = Point3(*snapshot.get("player_hit_effect_pos", [0, 0, 0]))
             effect_hpr = Point3(*snapshot.get("player_hit_effect_hpr", [0, 0, 0]))
             Sequence(
@@ -2559,7 +2572,7 @@ class MyApp(ShowBase):
         self.enemy_reset_shot(shooter_id)
         self.set_tank_alive("0", False)
         self.set_tank_reconstituting("0", True)
-        self.record_player_tank_hit_effect()
+        self.record_player_tank_hit_effect(shooter_id, shot_start, shot_end)
 
         self.last_player_hit_time = now
         self.set_tank_hit_cooldown("0", PLAYER_HIT_COOLDOWN)
@@ -2591,7 +2604,7 @@ class MyApp(ShowBase):
 
         self.set_tank_alive("0", False)
         self.set_tank_reconstituting("0", True)
-        self.record_player_tank_hit_effect()
+        self.record_player_tank_hit_effect(shooter_id, shot_start, shot_end)
         self.last_player_hit_time = now
         self.set_tank_hit_cooldown("0", PLAYER_HIT_COOLDOWN)
         self.set_tank_lives("0", max(0, self.tank_lives("0") - 1))
@@ -2602,23 +2615,63 @@ class MyApp(ShowBase):
             self.make_investigation_persistent_for_game_over()
             self.end_game()
 
-    def record_player_tank_hit_effect(self):
-        self.update_player_tank_visual()
-        self.player_hit_effect_serial += 1
-        self.player_hit_effect_pos = Point3(self.player_tank_visual.getPos(render))
-        self.player_hit_effect_hpr = self.player_tank_visual.getHpr(render)
-        self.play_player_tank_hit_effect(self.player_hit_effect_pos, self.player_hit_effect_hpr)
+    def tank_hit_effect_pose(self, tank_id):
+        if tank_id == "0":
+            self.update_player_tank_visual()
+        return self.tank_body_pos(tank_id), self.tank_body_hpr(tank_id)
 
-    def play_player_tank_hit_effect(self, pos, hpr):
+    def tank_hit_effect_color(self, tank_id):
+        if tank_id == "0":
+            return Point4(0.05, 0.35, 1.0, 1.0)
+        return tanks_dict[tank_id].get("color_scale", Point4(0.0, 0.8, 0.0, 1.0))
+
+    def record_tank_hit_event(self, victim_id, shooter_id=None, shot_start=None, shot_end=None, play_local=False):
+        pos, hpr = self.tank_hit_effect_pose(victim_id)
+        self.tank_hit_event_serial += 1
+        self.last_tank_hit_event = {
+            "serial": self.tank_hit_event_serial,
+            "victim_id": str(victim_id),
+            "shooter_id": str(shooter_id) if shooter_id is not None else "",
+            "pos": self.point_to_list(pos),
+            "hpr": self.hpr_to_list(hpr),
+            "shot_start": self.point_to_list(Point3(shot_start)) if shot_start is not None else None,
+            "shot_end": self.point_to_list(Point3(shot_end)) if shot_end is not None else None
+        }
+
+        if victim_id == "0":
+            self.player_hit_effect_serial = self.tank_hit_event_serial
+            self.player_hit_effect_pos = Point3(pos)
+            self.player_hit_effect_hpr = hpr
+
+        if play_local:
+            self.play_tank_hit_effect(victim_id, pos, hpr)
+
+    def play_tank_hit_event(self, event):
+        if not event:
+            return
+
+        victim_id = str(event.get("victim_id", ""))
+        if victim_id not in self.tank_ids_for_state():
+            return
+
+        pos = Point3(*event.get("pos", [0, 0, 0]))
+        hpr = Point3(*event.get("hpr", [0, 0, 0]))
+        Sequence(
+            Wait(NETWORK_EFFECT_DELAY),
+            Func(self.play_tank_hit_effect, victim_id, pos, hpr)
+        ).start()
+
+    def play_tank_hit_effect(self, tank_id, pos, hpr):
         if not hasattr(self, "tank_fragment_data"):
             return
 
-        self.hide_player_tank_for_hit_effect()
-        root = render.attachNewNode("Tank0-HitEffect")
+        if tank_id == "0":
+            self.hide_player_tank_for_hit_effect()
+        root = render.attachNewNode("Tank{}-HitEffect".format(tank_id))
         root.setPos(render, Point3(pos))
         root.setHpr(render, hpr)
-        root.setColorScale(0.05, 0.35, 1.0, 1.0)
-        fragments = Parallel(name="Tank0-HitFragments")
+        root.setColorScale(self.tank_hit_effect_color(tank_id))
+        fragments = Parallel(name="Tank{}-HitFragments".format(tank_id))
         for frag in self.tank_fragment_data:
             lines = create_lineSegs_object(frag["model"], 0, frag["name"])
             lines.setThickness(WORLD_LINE_THICKNESS)
@@ -2642,9 +2695,15 @@ class MyApp(ShowBase):
 
         Sequence(
             fragments,
-            Func(self.restore_player_tank_after_hit_effect),
+            Func(self.restore_player_tank_after_hit_effect if tank_id == "0" else lambda: None),
             Func(root.removeNode)
         ).start()
+
+    def record_player_tank_hit_effect(self, shooter_id=None, shot_start=None, shot_end=None):
+        self.record_tank_hit_event("0", shooter_id, shot_start, shot_end, play_local=True)
+
+    def play_player_tank_hit_effect(self, pos, hpr):
+        self.play_tank_hit_effect("0", pos, hpr)
 
     def hide_player_tank_for_hit_effect(self):
         if not hasattr(self, "player_tank_visual"):
@@ -4362,13 +4421,14 @@ class MyApp(ShowBase):
             Func(burst_np.removeNode)
         ).start()
 
-    def register_player_tank_hit(self, tank_id):
+    def register_player_tank_hit(self, tank_id, shooter_id="0", shot_start=None, shot_end=None):
         if tank_id not in tanks_list:
             return
         if not self.tank_is_hittable(tank_id):
             return
 
         print('hit tank ' + tank_id)
+        self.record_tank_hit_event(tank_id, shooter_id, shot_start, shot_end, play_local=False)
         self.set_tank_alive(tank_id, False)
         self.set_tank_reconstituting(tank_id, True)
         self.set_tank_hit_cooldown(tank_id, PLAYER_HIT_COOLDOWN)
@@ -4474,7 +4534,7 @@ class MyApp(ShowBase):
             first_duration = max(0.03, duration * min(1, visible_distance_to_impact / distance))
             interval = Sequence(
                 LerpPosInterval(round_np, first_duration, pos=impact),
-                Func(self.register_player_tank_hit, tank_hit["tank_id"])
+                Func(self.register_player_tank_hit, tank_hit["tank_id"], shooter_id, start, impact)
             )
             interval.setDoneEvent(done_event)
             return interval, impact, False
