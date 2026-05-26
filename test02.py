@@ -1734,12 +1734,12 @@ class MyApp(ShowBase):
         else:
             connected_tanks = []
         connected_text = "TANKS " + ",".join(connected_tanks) if connected_tanks else "WAITING"
-        self.startTextObject.text = "BATTLEZONE SERVER\n{}\n{}\n{} CLIENT{}\nENTER TO START".format(
+        self.startTextObject.text = "BATTLEZONE SERVER\n{}\n{} CLIENT{}\nENTER TO START".format(
             connected_text,
-            self.tank_lives_table_text(),
             connected,
             "" if connected == 1 else "S"
         )
+        self.position_lives_table()
         if self.waiting_to_start:
             self.startTextObject.show()
         for text_object in getattr(self, "environmentNameTextObjects", []):
@@ -1945,6 +1945,12 @@ class MyApp(ShowBase):
         for name, lives_text in self.tank_lives_rows():
             lines.append("{:<10} {}".format(name, lives_text))
         return "\n".join(lines)
+
+    def tank_lives_inline_text(self):
+        return " ".join([
+            "{} {}".format(name, lives_text)
+            for name, lives_text in self.tank_lives_rows()
+        ])
 
     def set_tank_hit_cooldown(self, tank_id, seconds):
         self.tank_lifecycle_state(tank_id)["hit_cooldown_until"] = ClockObject.getGlobalClock().getFrameTime() + seconds
@@ -3606,10 +3612,36 @@ class MyApp(ShowBase):
         for t in tanks_list:
             tanks_dict[t]["barrel_tilt"] = 0.0
 
-        self.livesTextObject = OnscreenText(text="", pos=(-0.5, -0.74),
-                                            align=TextNode.ALeft, scale=(0.033, 0.048),
-                                            fg=(0.4, 1.0, 0.4, 1), mayChange=True)
-        self.livesTextObject.reparentTo(render2d)
+        self.livesTableRoot = aspect2d.attachNewNode("LivesTable")
+        self.livesTableRoot.setPos(-1.18, 0, -0.62)
+        self.livesNameTextObjects = []
+        self.livesValueTextObjects = []
+        header_scale = (0.038, 0.055)
+        row_scale = (0.033, 0.048)
+        self.livesHeaderNameTextObject = OnscreenText(
+            text="TANKS", pos=(0, 0), align=TextNode.ALeft,
+            scale=header_scale, fg=(0.4, 1.0, 0.4, 1), mayChange=False
+        )
+        self.livesHeaderLivesTextObject = OnscreenText(
+            text="LIVES", pos=(0.38, 0), align=TextNode.ARight,
+            scale=header_scale, fg=(0.4, 1.0, 0.4, 1), mayChange=False
+        )
+        self.livesHeaderNameTextObject.reparentTo(self.livesTableRoot)
+        self.livesHeaderLivesTextObject.reparentTo(self.livesTableRoot)
+        for index, tank_id in enumerate(self.tank_ids_for_state()):
+            z = -0.07 * (index + 1)
+            name_text = OnscreenText(
+                text="", pos=(0, z), align=TextNode.ALeft,
+                scale=row_scale, fg=(0.4, 1.0, 0.4, 1), mayChange=True
+            )
+            lives_text = OnscreenText(
+                text="", pos=(0.38, z), align=TextNode.ARight,
+                scale=row_scale, fg=(0.4, 1.0, 0.4, 1), mayChange=True
+            )
+            name_text.reparentTo(self.livesTableRoot)
+            lives_text.reparentTo(self.livesTableRoot)
+            self.livesNameTextObjects.append(name_text)
+            self.livesValueTextObjects.append(lives_text)
 
         self.gameOverTextObject = OnscreenText(text="GAME OVER\nR TO RESTART", pos=(0, 0.08),
                                                align=TextNode.ACenter, scale=(0.08, 0.1),
@@ -3671,7 +3703,19 @@ class MyApp(ShowBase):
         self.update_lives_hud()
 
     def update_lives_hud(self):
-        self.livesTextObject.text = self.tank_lives_table_text()
+        rows = self.tank_lives_rows()
+        for index, (name, lives_text) in enumerate(rows):
+            self.livesNameTextObjects[index].text = name
+            self.livesValueTextObjects[index].text = lives_text
+        self.position_lives_table()
+
+    def position_lives_table(self):
+        if not hasattr(self, "livesTableRoot"):
+            return
+        if self.is_network_server_authority() and getattr(self, "waiting_to_start", False):
+            self.livesTableRoot.setPos(-0.2, 0, -0.02)
+        else:
+            self.livesTableRoot.setPos(-1.18, 0, -0.62)
 
     def render_tank_hud_labels(self):
         self.tank_hud_label_lines = {}
@@ -5317,7 +5361,7 @@ class MyApp(ShowBase):
                     + str(int(vectH[0] - theta)) + "\nCTRL TANK " + self.human_control_tank_id + \
                     "\nENEMY FIRE" + enemy_fire_text + \
                     "\nBARREL " + str(int(self.player_barrel_tilt)) + \
-                    "\n" + self.tank_lives_table_text()
+                    "\n" + self.tank_lives_inline_text()
         if self.network_bridge is not None:
             status_text += "\n" + self.network_bridge.status()
         elif self.is_network_client_controller():
