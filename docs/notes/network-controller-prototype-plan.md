@@ -43,6 +43,7 @@ tank-client-1
 - Server should treat tank 0 input like any other `RemoteTankController`.
 - Remove special cases where tank 0 is the authoritative camera.
 - Share tank hit events across all tank ids so clients can render destruction for tank 0 and tank 1 from the same snapshot event.
+- Track and display remaining lives for every active tank, not just tank 0.
 
 ## Milestone 3: Multiple Tank Clients
 

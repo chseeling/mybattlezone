@@ -1734,8 +1734,9 @@ class MyApp(ShowBase):
         else:
             connected_tanks = []
         connected_text = "TANKS " + ",".join(connected_tanks) if connected_tanks else "WAITING"
-        self.startTextObject.text = "BATTLEZONE SERVER\n{}\n{} CLIENT{}\nENTER TO START".format(
+        self.startTextObject.text = "BATTLEZONE SERVER\n{}\n{}\n{} CLIENT{}\nENTER TO START".format(
             connected_text,
+            self.tank_lives_text(),
             connected,
             "" if connected == 1 else "S"
         )
@@ -1898,7 +1899,7 @@ class MyApp(ShowBase):
             self.tank_lifecycle[tank_id] = {
                 "alive": True,
                 "reconstituting": False,
-                "lives": PLAYER_MAX_LIVES if tank_id == "0" else None,
+                "lives": PLAYER_MAX_LIVES,
                 "hit_cooldown_until": -PLAYER_HIT_COOLDOWN
             }
 
@@ -1928,6 +1929,14 @@ class MyApp(ShowBase):
         if tank_id == "0":
             self.player_lives = int(lives)
 
+    def tank_lives_text(self):
+        parts = []
+        for tank_id in self.tank_ids_for_state():
+            lives = self.tank_lives(tank_id)
+            lives_text = "-" if lives is None else str(int(lives))
+            parts.append("T{}:{}".format(tank_id, lives_text))
+        return " ".join(parts)
+
     def set_tank_hit_cooldown(self, tank_id, seconds):
         self.tank_lifecycle_state(tank_id)["hit_cooldown_until"] = ClockObject.getGlobalClock().getFrameTime() + seconds
 
@@ -1937,7 +1946,9 @@ class MyApp(ShowBase):
         return now >= self.tank_lifecycle_state(tank_id).get("hit_cooldown_until", 0)
 
     def tank_is_hittable(self, tank_id, now=None):
-        if tank_id == "0" and (self.game_over or self.tank_lives("0") <= 0):
+        if tank_id == "0" and self.game_over:
+            return False
+        if self.tank_lives(tank_id) is not None and self.tank_lives(tank_id) <= 0:
             return False
         if not self.tank_is_alive(tank_id) or self.tank_is_reconstituting(tank_id):
             return False
@@ -2185,9 +2196,9 @@ class MyApp(ShowBase):
         self.game_over = bool(snapshot.get("game_over", False))
         self.network_connected_tanks = snapshot.get("connected_tanks", [])
         self.player_lives = int(snapshot.get("player_lives", self.player_lives))
-        tank0_state = snapshot.get("tanks", {}).get("0", {})
-        if tank0_state.get("lives") is not None:
-            self.set_tank_lives("0", int(tank0_state.get("lives", self.player_lives)))
+        for tank_id, tank_state in snapshot.get("tanks", {}).items():
+            if tank_id in self.tank_lifecycle and tank_state.get("lives") is not None:
+                self.set_tank_lives(tank_id, int(tank_state.get("lives")))
         self.update_lives_hud()
         tank_hit_serial = int(snapshot.get("tank_hit_event_serial", 0))
         if not first_snapshot and tank_hit_serial > self.network_tank_hit_event_serial:
@@ -2984,6 +2995,10 @@ class MyApp(ShowBase):
         self.player_barrel_tilt = 0.0
         for t in tanks_list:
             tanks_dict[t]["barrel_tilt"] = 0.0
+            self.set_tank_alive(t, True)
+            self.set_tank_reconstituting(t, False)
+            self.set_tank_lives(t, PLAYER_MAX_LIVES)
+            self.set_tank_hit_cooldown(t, 0)
         self.startTextObject.hide()
         for text_object in getattr(self, "environmentNameTextObjects", []):
             text_object.hide()
@@ -3201,6 +3216,7 @@ class MyApp(ShowBase):
         self.player_barrel_tilt = 0.0
         for t in tanks_list:
             tanks_dict[t]["barrel_tilt"] = 0.0
+            self.set_tank_lives(t, PLAYER_MAX_LIVES)
         self.update_barrel_aim_marker()
         self.reset_shot()
         for t in tanks_list:
@@ -3212,6 +3228,7 @@ class MyApp(ShowBase):
             tanks_dict[t]["attack_ready_time"] = 0
             self.set_tank_alive(t, True)
             self.set_tank_reconstituting(t, False)
+            self.set_tank_lives(t, PLAYER_MAX_LIVES)
             self.set_tank_hit_cooldown(t, 0)
             self.enemy_reset_shot(t)
         self.update_lives_hud()
@@ -3556,6 +3573,7 @@ class MyApp(ShowBase):
         for t in tanks_list:
             self.set_tank_alive(t, True)
             self.set_tank_reconstituting(t, False)
+            self.set_tank_lives(t, PLAYER_MAX_LIVES)
             self.set_tank_hit_cooldown(t, 0)
         self.hit_flash_alpha = 0
         self.investigation_mode = False
@@ -3644,7 +3662,7 @@ class MyApp(ShowBase):
         self.update_lives_hud()
 
     def update_lives_hud(self):
-        self.livesTextObject.text = "LIVES " + " ".join(["|"] * self.player_lives)
+        self.livesTextObject.text = "LIVES " + self.tank_lives_text()
 
     def render_tank_hud_labels(self):
         self.tank_hud_label_lines = {}
@@ -4317,6 +4335,14 @@ class MyApp(ShowBase):
     def explosion_cleanup(self, t):
         if t in tanks_list:
             tanks_dict[t]["frags"].hide()
+            if self.tank_lives(t) is not None and self.tank_lives(t) <= 0:
+                tanks_dict[t]["move"] = False
+                tanks_dict[t]["tank"].hide()
+                self.set_tank_alive(t, False)
+                self.set_tank_reconstituting(t, False)
+                self.update_lives_hud()
+                return
+
             pos = tanks_dict[t]["Locator"].getPos()
             self.set_tank_on_terrain(t, Point3(-pos[1], -pos[0], 0), tanks_dict[t]["tank"].getH(render))
             tanks_dict[t]["move"] = True
@@ -4660,6 +4686,8 @@ class MyApp(ShowBase):
         self.set_tank_alive(tank_id, False)
         self.set_tank_reconstituting(tank_id, True)
         self.set_tank_hit_cooldown(tank_id, PLAYER_HIT_COOLDOWN)
+        self.set_tank_lives(tank_id, max(0, self.tank_lives(tank_id) - 1))
+        self.update_lives_hud()
         tanks_dict[tank_id]["move"] = False
         tanks_dict[tank_id]["tank"].hide()
         tanks_dict[tank_id]["frags"].showThrough()
@@ -5279,7 +5307,8 @@ class MyApp(ShowBase):
         status_text = str(int(vectH[0] + 180)) + ", " + str(int(rad)) + ", " + str(int(theta)) + ", " \
                     + str(int(vectH[0] - theta)) + "\nCTRL TANK " + self.human_control_tank_id + \
                     "\nENEMY FIRE" + enemy_fire_text + \
-                    "\nBARREL " + str(int(self.player_barrel_tilt))
+                    "\nBARREL " + str(int(self.player_barrel_tilt)) + \
+                    "\n" + self.tank_lives_text()
         if self.network_bridge is not None:
             status_text += "\n" + self.network_bridge.status()
         elif self.is_network_client_controller():
