@@ -70,6 +70,7 @@ Useful environment variables:
 - `BATTLEZONE_NET_TANK`: controlled tank id, default `1`.
 - `BATTLEZONE_NET_CLIENT_LOW_RENDER`: client-only lighter render mode, default `1`.
 - `BATTLEZONE_NET_SERVER_LOW_RENDER`: server-only lighter render mode, default `1`.
+- `BATTLEZONE_AUDIO_FOCUS_MUTE`: mute this process when its window is not focused, default `1`.
 - `BATTLEZONE_ACTIVE_TANKS`: comma-separated active non-player tanks. Network modes default to `1` for a tank 0 + tank 1 test.
 
 ## Local Test Recipes

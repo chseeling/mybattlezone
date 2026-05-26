@@ -105,6 +105,7 @@ NETWORK_CLIENT_LOW_RENDER = os.environ.get("BATTLEZONE_NET_CLIENT_LOW_RENDER", "
 NETWORK_CLIENT_LOW_RENDER_SIZE = (960, 540)
 NETWORK_SERVER_LOW_RENDER = os.environ.get("BATTLEZONE_NET_SERVER_LOW_RENDER", "1").lower() in {"1", "true", "yes", "on"}
 NETWORK_SERVER_LOW_RENDER_SIZE = (720, 405)
+AUDIO_FOCUS_MUTE = os.environ.get("BATTLEZONE_AUDIO_FOCUS_MUTE", "1").lower() in {"1", "true", "yes", "on"}
 MOUNTAIN_BLOOM_ALPHA = 0.11
 MOUNTAIN_BLOOM_THICKNESS = 7
 MOUNTAIN_HALO_ALPHA = 0.025
@@ -1164,7 +1165,17 @@ class MyApp(ShowBase):
         self.gameOver_snd = base.loader.loadSfx("sfx/gameOver.wav")
         self.investigation_snd = base.loader.loadSfx("sfx/investigation.wav")
         self.investigation_snd.setLoop(True)
-        self.investigation_snd.setVolume(0.9)
+        self.audio_focus_enabled = AUDIO_FOCUS_MUTE
+        self.audio_has_focus = True
+        self.sound_base_volumes = {
+            self.ambient_snd: 1.0,
+            self.mainShot_snd: 1.0,
+            self.enemyShot_snd: 1.0,
+            self.enemyTankExplosion_snd: 1.0,
+            self.gameOver_snd: 1.0,
+            self.investigation_snd: 0.9,
+        }
+        self.apply_audio_focus_volume()
 
         if DEBUG:
             device_list = self.devices.getDevices()
@@ -1347,6 +1358,7 @@ class MyApp(ShowBase):
         self.taskMgr.add(self.updateAuxiliaryViewsTask, "UpdateAuxiliaryViewsTask")
         self.taskMgr.add(self.updateReconDroneTask, "UpdateReconDroneTask")
         self.taskMgr.add(self.updateTankHudLabelsTask, "UpdateTankHudLabelsTask")
+        self.taskMgr.add(self.updateAudioFocusTask, "UpdateAudioFocusTask")
         if self.network_bridge is not None:
             self.taskMgr.add(self.updateNetworkTask, "UpdateNetworkTask")
 
@@ -1612,6 +1624,34 @@ class MyApp(ShowBase):
         if self.network_client_has_snapshot():
             dt = min(ClockObject.getGlobalClock().getDt(), 0.05)
             self.update_network_snapshot_render(dt)
+        return Task.cont
+
+    def audio_process_should_be_audible(self):
+        if self.is_network_server_authority():
+            return False
+        if not self.audio_focus_enabled:
+            return True
+        return self.audio_has_focus
+
+    def apply_audio_focus_volume(self):
+        audible = self.audio_process_should_be_audible() if hasattr(self, "audio_has_focus") else True
+        for sound, base_volume in getattr(self, "sound_base_volumes", {}).items():
+            sound.setVolume(base_volume if audible else 0.0)
+
+    def window_has_audio_focus(self):
+        try:
+            properties = base.win.getProperties()
+            if hasattr(properties, "getForeground"):
+                return bool(properties.getForeground())
+        except Exception:
+            pass
+        return True
+
+    def updateAudioFocusTask(self, task):
+        has_focus = self.window_has_audio_focus()
+        if has_focus != self.audio_has_focus:
+            self.audio_has_focus = has_focus
+            self.apply_audio_focus_volume()
         return Task.cont
 
     def point_to_list(self, point):
@@ -3744,6 +3784,8 @@ class MyApp(ShowBase):
             self.userExit()
             return
 
+        self.audio_has_focus = self.window_has_audio_focus()
+        self.apply_audio_focus_volume()
         self.update_drone_view_overlay()
         self.update_environment_preview_overlay()
 
