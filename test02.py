@@ -101,6 +101,7 @@ NETWORK_SNAPSHOT_RATE = 25.0
 NETWORK_SMOOTHING_RATE = 14.0
 NETWORK_RENDER_DELAY = 0.08
 NETWORK_EFFECT_DELAY = NETWORK_RENDER_DELAY
+NETWORK_CLIENT_TIMEOUT = 2.5
 NETWORK_CLIENT_LOW_RENDER = os.environ.get("BATTLEZONE_NET_CLIENT_LOW_RENDER", "1").lower() in {"1", "true", "yes", "on"}
 NETWORK_CLIENT_LOW_RENDER_SIZE = (960, 540)
 NETWORK_SERVER_LOW_RENDER = os.environ.get("BATTLEZONE_NET_SERVER_LOW_RENDER", "1").lower() in {"1", "true", "yes", "on"}
@@ -773,6 +774,7 @@ class UdpTankInputBridge:
         self.socket.setblocking(False)
         self.client_addr = None
         self.client_addrs = {}
+        self.client_last_seen = {}
         self.last_send_time = 0
         self.last_snapshot_time = 0
         self.last_fire_down = False
@@ -790,15 +792,20 @@ class UdpTankInputBridge:
 
     def status(self):
         if self.mode == "host":
-            peer = "{} CLIENT{}".format(len(self.client_addrs), "" if len(self.client_addrs) == 1 else "S") if self.client_addrs else "WAIT"
+            connected = self.connected_tank_ids()
+            peer = ",".join(connected) if connected else "WAIT"
             return "NET SERVER {}".format(peer)
         if self.mode == "client":
             return "NET CLIENT {}".format(self.tank_id)
         return ""
 
+    def connected_tank_ids(self):
+        return sorted(self.client_addrs.keys(), key=lambda tank_id: int(tank_id))
+
     def update(self, task_time):
         if self.mode == "host":
             self.receive_host_packets(task_time)
+            self.expire_host_clients(task_time)
             self.send_host_snapshot(task_time)
         elif self.mode == "client":
             self.receive_client_packets(task_time)
@@ -825,6 +832,7 @@ class UdpTankInputBridge:
 
             self.client_addr = addr
             self.client_addrs[tank_id] = addr
+            self.client_last_seen[tank_id] = task_time
             self.last_packet_time = task_time
             self.last_packet_count += 1
             self.app.submit_remote_tank_input(
@@ -852,6 +860,17 @@ class UdpTankInputBridge:
                 stale_tanks.append(tank_id)
         for tank_id in stale_tanks:
             self.client_addrs.pop(tank_id, None)
+            self.client_last_seen.pop(tank_id, None)
+
+    def expire_host_clients(self, task_time):
+        stale_tanks = [
+            tank_id
+            for tank_id, last_seen in self.client_last_seen.items()
+            if task_time - last_seen > NETWORK_CLIENT_TIMEOUT
+        ]
+        for tank_id in stale_tanks:
+            self.client_addrs.pop(tank_id, None)
+            self.client_last_seen.pop(tank_id, None)
 
     def receive_client_packets(self, task_time):
         while True:
@@ -1454,6 +1473,7 @@ class MyApp(ShowBase):
         self.network_snapshot_received = False
         self.network_snapshot_targets = {"tanks": {}, "shots": {}}
         self.network_snapshot_history = []
+        self.network_connected_tanks = []
         if NETWORK_MODE not in {"host", "client"}:
             return
 
@@ -1507,6 +1527,11 @@ class MyApp(ShowBase):
             return "LOW RENDER MODE"
         return "WATCH HOST WINDOW"
 
+    def network_connected_tank_ids(self):
+        if self.network_bridge is None or not hasattr(self.network_bridge, "connected_tank_ids"):
+            return []
+        return self.network_bridge.connected_tank_ids()
+
     def apply_network_client_low_render_settings(self):
         if not self.is_network_client_low_render():
             return
@@ -1554,8 +1579,13 @@ class MyApp(ShowBase):
 
         connected = 0
         if self.network_bridge is not None:
-            connected = len(getattr(self.network_bridge, "client_addrs", {}))
-        self.startTextObject.text = "BATTLEZONE SERVER\n{} CLIENT{}\nENTER TO START".format(
+            connected_tanks = self.network_connected_tank_ids()
+            connected = len(connected_tanks)
+        else:
+            connected_tanks = []
+        connected_text = "TANKS " + ",".join(connected_tanks) if connected_tanks else "WAITING"
+        self.startTextObject.text = "BATTLEZONE SERVER\n{}\n{} CLIENT{}\nENTER TO START".format(
+            connected_text,
             connected,
             "" if connected == 1 else "S"
         )
@@ -1976,6 +2006,7 @@ class MyApp(ShowBase):
             "player_hit_effect_hpr": self.hpr_to_list(self.player_hit_effect_hpr),
             "tank_hit_event_serial": self.tank_hit_event_serial,
             "tank_hit_event": self.last_tank_hit_event,
+            "connected_tanks": self.network_connected_tank_ids(),
             "tanks": {},
             "shots": {}
         }
@@ -2001,6 +2032,7 @@ class MyApp(ShowBase):
 
         self.waiting_to_start = bool(snapshot.get("waiting_to_start", False))
         self.game_over = bool(snapshot.get("game_over", False))
+        self.network_connected_tanks = snapshot.get("connected_tanks", [])
         self.player_lives = int(snapshot.get("player_lives", self.player_lives))
         tank0_state = snapshot.get("tanks", {}).get("0", {})
         if tank0_state.get("lives") is not None:
@@ -5096,6 +5128,9 @@ class MyApp(ShowBase):
                     "\nBARREL " + str(int(self.player_barrel_tilt))
         if self.network_bridge is not None:
             status_text += "\n" + self.network_bridge.status()
+        elif self.is_network_client_controller():
+            connected = ",".join(getattr(self, "network_connected_tanks", [])) or "?"
+            status_text += "\nNET CLIENT {}\nSERVER TANKS {}".format(NETWORK_TANK_ID, connected)
         if self.is_network_client_low_render():
             status_text += "\nCLIENT LOW RENDER"
         self.textObject.text = status_text
