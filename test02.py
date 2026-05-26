@@ -65,7 +65,7 @@ tanks_dict = {"0": {},
 
 def configured_active_tanks():
     network_mode = os.environ.get("BATTLEZONE_NET_MODE", "").lower()
-    default_tanks = "1" if network_mode in {"host", "client"} else "1,2,3"
+    default_tanks = "1" if network_mode in {"server", "host", "client"} else "1,2,3"
     requested = os.environ.get("BATTLEZONE_ACTIVE_TANKS", default_tanks)
     active = {
         tank_id.strip()
@@ -84,8 +84,15 @@ def configured_active_tanks():
 
 tanks_list = configured_active_tanks()
 NUMET = len(tanks_list)  # number of active non-player tanks
+
+def network_tank_ids():
+    return {"0"} | set(tanks_list)
+
 DEBUG = os.environ.get("BATTLEZONE_DEBUG", "").lower() in {"1", "true", "yes", "on"}
 NETWORK_MODE = os.environ.get("BATTLEZONE_NET_MODE", "").lower()
+if NETWORK_MODE == "server":
+    NETWORK_MODE = "host"
+NETWORK_MODE_LABEL = "server" if os.environ.get("BATTLEZONE_NET_MODE", "").lower() == "server" else NETWORK_MODE
 NETWORK_HOST = os.environ.get("BATTLEZONE_NET_HOST", "127.0.0.1")
 NETWORK_PORT = int(os.environ.get("BATTLEZONE_NET_PORT", "51515"))
 NETWORK_TANK_ID = os.environ.get("BATTLEZONE_NET_TANK", "1")
@@ -96,6 +103,8 @@ NETWORK_RENDER_DELAY = 0.08
 NETWORK_EFFECT_DELAY = NETWORK_RENDER_DELAY
 NETWORK_CLIENT_LOW_RENDER = os.environ.get("BATTLEZONE_NET_CLIENT_LOW_RENDER", "1").lower() in {"1", "true", "yes", "on"}
 NETWORK_CLIENT_LOW_RENDER_SIZE = (960, 540)
+NETWORK_SERVER_LOW_RENDER = os.environ.get("BATTLEZONE_NET_SERVER_LOW_RENDER", "1").lower() in {"1", "true", "yes", "on"}
+NETWORK_SERVER_LOW_RENDER_SIZE = (720, 405)
 MOUNTAIN_BLOOM_ALPHA = 0.11
 MOUNTAIN_BLOOM_THICKNESS = 7
 MOUNTAIN_HALO_ALPHA = 0.025
@@ -142,6 +151,7 @@ TERRAIN_SLOPE_RESPONSE = 0.75
 ENEMY_CONTROLLER_MODE = "TACTICAL"
 TACTICAL_AI_DEBUG_LABELS = True
 TACTICAL_AI_AIM_TOLERANCE_DEGREES = 3.0
+TACTICAL_AI_BARREL_TILT_TOLERANCE_DEGREES = 1.2
 TACTICAL_AI_IDEAL_RANGE = 72.0
 TACTICAL_AI_MIN_RANGE = 34.0
 TACTICAL_AI_MAX_RANGE = 145.0
@@ -155,6 +165,7 @@ TACTICAL_AI_AIM_DWELL_SECONDS = 0.55
 TACTICAL_AI_SHOT_VERTICAL_JITTER = 0.22
 TACTICAL_AI_SHOT_LATERAL_JITTER = 0.55
 TANK_RESPAWN_ATTACK_COOLDOWN = 5.0
+TANK_FIRE_COOLDOWN = 1.1
 PLAYER_BARREL_TILT_MIN = -8.0
 PLAYER_BARREL_TILT_MAX = 12.0
 PLAYER_BARREL_TILT_RATE = 18.0
@@ -645,13 +656,14 @@ def create_radar_sweep_slice(radius, arc_degrees, max_alpha, segments=18):
 
 class TankCommand:
     def __init__(self, throttle=0.0, turn=0.0, fire=False, barrel_tilt=0.0,
-                 desired_world_pos=None, desired_heading=None):
+                 desired_world_pos=None, desired_heading=None, desired_barrel_tilt=None):
         self.throttle = throttle
         self.turn = turn
         self.fire = fire
         self.barrel_tilt = barrel_tilt
         self.desired_world_pos = desired_world_pos
         self.desired_heading = desired_heading
+        self.desired_barrel_tilt = desired_barrel_tilt
 
 
 class TankAvatar:
@@ -743,7 +755,8 @@ class RemoteTankController(TankController):
             fire=False,
             barrel_tilt=command.barrel_tilt,
             desired_world_pos=command.desired_world_pos,
-            desired_heading=command.desired_heading
+            desired_heading=command.desired_heading,
+            desired_barrel_tilt=command.desired_barrel_tilt
         )
         return command
 
@@ -758,6 +771,7 @@ class UdpTankInputBridge:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.setblocking(False)
         self.client_addr = None
+        self.client_addrs = {}
         self.last_send_time = 0
         self.last_snapshot_time = 0
         self.last_fire_down = False
@@ -775,8 +789,8 @@ class UdpTankInputBridge:
 
     def status(self):
         if self.mode == "host":
-            peer = "CONNECTED" if self.client_addr else "WAIT"
-            return "NET HOST {} {}".format(self.tank_id, peer)
+            peer = "{} CLIENT{}".format(len(self.client_addrs), "" if len(self.client_addrs) == 1 else "S") if self.client_addrs else "WAIT"
+            return "NET SERVER {}".format(peer)
         if self.mode == "client":
             return "NET CLIENT {}".format(self.tank_id)
         return ""
@@ -805,10 +819,11 @@ class UdpTankInputBridge:
                 continue
 
             tank_id = str(message.get("tank_id", self.tank_id))
-            if tank_id not in tanks_list:
+            if tank_id not in network_tank_ids():
                 continue
 
             self.client_addr = addr
+            self.client_addrs[tank_id] = addr
             self.last_packet_time = task_time
             self.last_packet_count += 1
             self.app.submit_remote_tank_input(
@@ -820,14 +835,22 @@ class UdpTankInputBridge:
             )
 
     def send_host_snapshot(self, task_time):
-        if self.client_addr is None:
+        if not self.client_addrs:
             return
         if task_time - self.last_snapshot_time < 1.0 / NETWORK_SNAPSHOT_RATE:
             return
         self.last_snapshot_time = task_time
 
         payload = self.app.build_network_snapshot(task_time)
-        self.socket.sendto(json.dumps(payload).encode("utf-8"), self.client_addr)
+        packet = json.dumps(payload).encode("utf-8")
+        stale_tanks = []
+        for tank_id, addr in self.client_addrs.items():
+            try:
+                self.socket.sendto(packet, addr)
+            except OSError:
+                stale_tanks.append(tank_id)
+        for tank_id in stale_tanks:
+            self.client_addrs.pop(tank_id, None)
 
     def receive_client_packets(self, task_time):
         while True:
@@ -954,6 +977,9 @@ class TacticalAiTankController(TankController):
         self.min_range = TACTICAL_AI_MIN_RANGE + (int(tank_id) - 2) * 3.0
         self.max_range = TACTICAL_AI_MAX_RANGE + (int(tank_id) - 2) * 9.0
         self.base_strafe_weight = 0.62 + int(tank_id) * 0.08
+        self.aim_heading_jitter = 0.0
+        self.aim_tilt_jitter = 0.0
+        self.next_aim_jitter_time = 0.0
         self.debug_state = "INIT"
 
     def command(self, app, avatar, dt, task_time):
@@ -985,13 +1011,22 @@ class TacticalAiTankController(TankController):
             )
             self.strafe_sign *= -1
 
-        aim_heading = observation["heading_to_player"]
-        aligned = abs(observation["aim_error"]) <= TACTICAL_AI_AIM_TOLERANCE_DEGREES
+        if task_time >= self.next_aim_jitter_time:
+            self.aim_heading_jitter = (random() - 0.5) * TACTICAL_AI_SHOT_LATERAL_JITTER
+            self.aim_tilt_jitter = (random() - 0.5) * TACTICAL_AI_SHOT_VERTICAL_JITTER
+            self.next_aim_jitter_time = task_time + 0.75
+
+        aim_heading = observation["heading_to_player"] + self.aim_heading_jitter
+        desired_barrel_tilt = observation["barrel_tilt_target"] + self.aim_tilt_jitter
+        aim_error = signed_angular_delta_degrees(aim_heading, observation["tank_heading"])
+        barrel_tilt_error = desired_barrel_tilt - app.tank_barrel_tilt(self.tank_id)
+        aligned = abs(aim_error) <= TACTICAL_AI_AIM_TOLERANCE_DEGREES
+        barrel_aligned = abs(barrel_tilt_error) <= TACTICAL_AI_BARREL_TILT_TOLERANCE_DEGREES
         range_is_good = (
             self.min_range <= observation["distance_to_player"] <= self.max_range
         )
         firing_lane = observation["line_of_sight"] or observation["risky_line_of_sight"]
-        stable_firing_solution = firing_lane and range_is_good and aligned
+        stable_firing_solution = firing_lane and range_is_good and aligned and barrel_aligned
         if stable_firing_solution:
             if self.aim_acquired_since is None:
                 self.aim_acquired_since = task_time
@@ -1005,6 +1040,7 @@ class TacticalAiTankController(TankController):
         can_fire = (
             firing_lane and
             aligned and
+            barrel_aligned and
             range_is_good and
             aim_dwell_complete and
             not observation["is_shooting"] and
@@ -1026,6 +1062,7 @@ class TacticalAiTankController(TankController):
             return TankCommand(
                 desired_world_pos=desired_world,
                 desired_heading=aim_heading,
+                desired_barrel_tilt=desired_barrel_tilt,
                 fire=True
             )
 
@@ -1041,6 +1078,7 @@ class TacticalAiTankController(TankController):
             return TankCommand(
                 desired_world_pos=Point3(observation["tank_pos"]),
                 desired_heading=aim_heading,
+                desired_barrel_tilt=desired_barrel_tilt,
                 fire=False
             )
 
@@ -1056,6 +1094,7 @@ class TacticalAiTankController(TankController):
         return TankCommand(
             desired_world_pos=desired_world,
             desired_heading=aim_heading,
+            desired_barrel_tilt=desired_barrel_tilt,
             fire=False
         )
 
@@ -1072,6 +1111,8 @@ class TacticalAiTankController(TankController):
             return "RISK"
         if not aligned:
             return "AIM"
+        if abs(observation.get("barrel_tilt_error", 0.0)) > TACTICAL_AI_BARREL_TILT_TOLERANCE_DEGREES:
+            return "ELEV"
         if not aim_dwell_complete:
             return "LOCK"
         if task_time < self.reposition_until:
@@ -1309,7 +1350,7 @@ class MyApp(ShowBase):
         # base.messenger.toggleVerbose()
 
         self.bloom_enabled = True
-        if self.is_network_client_low_render():
+        if self.is_network_client_low_render() or self.is_network_server_low_render():
             self.bloom_enabled = False
         self.accept('enter', self.start_game)
         self.accept('space', self.request_player_fire)
@@ -1354,6 +1395,7 @@ class MyApp(ShowBase):
         self.bloomTextObject.reparentTo(self.render2d)
         self.set_bloom_enabled(self.bloom_enabled)
         self.apply_network_client_low_render_settings()
+        self.apply_network_server_low_render_settings()
         self.position_start_camera()
         self.update_start_screen_presentation()
 
@@ -1374,6 +1416,7 @@ class MyApp(ShowBase):
         }
         self.ai_tank_controllers = {}
         self.remote_tank_controllers = {}
+        self.remote_tank_controllers["0"] = RemoteTankController()
 
         for t in tanks_list:
             self.tank_avatars[t] = TankAvatar(
@@ -1399,8 +1442,8 @@ class MyApp(ShowBase):
         if NETWORK_MODE not in {"host", "client"}:
             return
 
-        if NETWORK_TANK_ID not in tanks_list:
-            print("Ignoring network tank id {}; choose one of {}".format(NETWORK_TANK_ID, sorted(tanks_list)))
+        if NETWORK_TANK_ID not in network_tank_ids():
+            print("Ignoring network tank id {}; choose one of {}".format(NETWORK_TANK_ID, sorted(network_tank_ids())))
             return
 
         try:
@@ -1417,7 +1460,13 @@ class MyApp(ShowBase):
             return
 
         if NETWORK_MODE == "host":
-            self.set_remote_control_tank(NETWORK_TANK_ID)
+            if NETWORK_MODE_LABEL == "server":
+                self.set_remote_control_tank("0")
+                for t in tanks_list:
+                    self.set_remote_control_tank(t)
+                self.update_network_server_presentation()
+            else:
+                self.set_remote_control_tank(NETWORK_TANK_ID)
         elif NETWORK_MODE == "client":
             self.set_human_control_tank(NETWORK_TANK_ID)
             self.network_client_controller_mode = True
@@ -1429,8 +1478,14 @@ class MyApp(ShowBase):
     def is_network_client_controller(self):
         return getattr(self, "network_client_controller_mode", False)
 
+    def is_network_server_authority(self):
+        return NETWORK_MODE == "host" and NETWORK_MODE_LABEL == "server"
+
     def is_network_client_low_render(self):
         return self.is_network_client_controller() and getattr(self, "network_client_low_render_mode", False)
+
+    def is_network_server_low_render(self):
+        return self.is_network_server_authority() and NETWORK_SERVER_LOW_RENDER
 
     def network_client_mode_label(self):
         if self.is_network_client_low_render():
@@ -1443,6 +1498,15 @@ class MyApp(ShowBase):
 
         props = WindowProperties()
         props.setSize(*NETWORK_CLIENT_LOW_RENDER_SIZE)
+        base.win.requestProperties(props)
+        self.set_bloom_enabled(False)
+
+    def apply_network_server_low_render_settings(self):
+        if not self.is_network_server_low_render():
+            return
+
+        props = WindowProperties()
+        props.setSize(*NETWORK_SERVER_LOW_RENDER_SIZE)
         base.win.requestProperties(props)
         self.set_bloom_enabled(False)
 
@@ -1469,6 +1533,28 @@ class MyApp(ShowBase):
             self.hitFlashNp.hide()
         self.update_start_screen_presentation()
 
+    def update_network_server_presentation(self):
+        if not self.is_network_server_authority():
+            return
+
+        connected = 0
+        if self.network_bridge is not None:
+            connected = len(getattr(self.network_bridge, "client_addrs", {}))
+        self.startTextObject.text = "BATTLEZONE SERVER\n{} CLIENT{}\nENTER TO START".format(
+            connected,
+            "" if connected == 1 else "S"
+        )
+        if self.waiting_to_start:
+            self.startTextObject.show()
+        for text_object in getattr(self, "environmentNameTextObjects", []):
+            text_object.hide()
+        self.environmentTextObject.hide()
+        if hasattr(self, "gameOverTextObject") and not self.game_over:
+            self.gameOverTextObject.hide()
+        if hasattr(self, "hitFlashNp"):
+            self.hitFlashNp.hide()
+        self.update_start_screen_presentation()
+
     def network_client_has_snapshot(self):
         return self.is_network_client_controller() and getattr(self, "network_snapshot_received", False)
 
@@ -1486,7 +1572,7 @@ class MyApp(ShowBase):
             )
 
     def set_remote_control_tank(self, tank_id):
-        if tank_id not in tanks_list:
+        if tank_id not in network_tank_ids():
             return
 
         if self.human_control_tank_id == tank_id:
@@ -1494,15 +1580,18 @@ class MyApp(ShowBase):
         self.tank_controllers[tank_id] = self.remote_tank_controllers[tank_id]
 
     def clear_remote_control_tank(self, tank_id):
-        if tank_id not in tanks_list:
+        if tank_id not in network_tank_ids():
             return
 
         if self.human_control_tank_id == tank_id:
             return
+        if tank_id == "0":
+            self.tank_controllers["0"] = self.human_tank_controller
+            return
         self.tank_controllers[tank_id] = self.ai_tank_controllers[tank_id]
 
     def submit_remote_tank_input(self, tank_id, throttle=0.0, turn=0.0, fire=False, barrel_tilt=0.0):
-        if tank_id not in tanks_list:
+        if tank_id not in network_tank_ids():
             return
 
         self.remote_tank_controllers[tank_id].submit_input(
@@ -1515,6 +1604,8 @@ class MyApp(ShowBase):
     def updateNetworkTask(self, task):
         if self.network_bridge is not None:
             self.network_bridge.update(getattr(task, "time", ClockObject.getGlobalClock().getFrameTime()))
+        if self.is_network_server_authority() and getattr(self, "waiting_to_start", False):
+            self.update_network_server_presentation()
         if self.network_client_has_snapshot():
             dt = min(ClockObject.getGlobalClock().getDt(), 0.05)
             self.update_network_snapshot_render(dt)
@@ -1536,6 +1627,18 @@ class MyApp(ShowBase):
                 "view_heading_offset": -90,
                 "body_heading_offset": 90,
                 "body_forward_axis": "x",
+                "shot_mount": self.camera,
+                "shot_start_local": Point3(0, PLAYER_SHOT_START_Y, PLAYER_SHOT_START_Z),
+                "shot_stowed_local": Point3(0, PLAYER_SHOT_START_Y, PLAYER_SHOT_START_Z - 10),
+                "shot_stowed_hpr": Point3(0, 90, 0),
+                "aim_mount": self.camera,
+                "aim_reference_local": Point3(0, PLAYER_BARREL_AIM_REFERENCE_DISTANCE, 0),
+                "aim_forward_axis": "y",
+                "aim_height": 0.0,
+                "collision_backtrace": PLAYER_SHOT_BACKTRACE_DISTANCE,
+                "shot_distance": 200,
+                "shot_duration": 1.1,
+                "fire_cooldown": TANK_FIRE_COOLDOWN,
                 "is_player": True
             }
         }
@@ -1549,6 +1652,18 @@ class MyApp(ShowBase):
                 "view_heading_offset": -90,
                 "body_heading_offset": 0,
                 "body_forward_axis": "x",
+                "shot_mount": tanks_dict[t]["tank"],
+                "shot_start_local": Point3(-0.4, 0, 1.61325),
+                "shot_stowed_local": Point3(-0.4, 0, 1.61325),
+                "shot_stowed_hpr": Point3(0, 0, 90),
+                "aim_mount": tanks_dict[t]["tank"],
+                "aim_reference_local": Point3(PLAYER_BARREL_AIM_REFERENCE_DISTANCE, 0, 0),
+                "aim_forward_axis": "x",
+                "aim_height": 1.61325,
+                "collision_backtrace": 0,
+                "shot_distance": 300,
+                "shot_duration": 1.1,
+                "fire_cooldown": TANK_FIRE_COOLDOWN,
                 "is_player": False
             }
 
@@ -1563,6 +1678,12 @@ class MyApp(ShowBase):
 
     def tank_shot_node(self, tank_id):
         return self.tank_runtime_state(tank_id)["shot"]
+
+    def tank_shot_mount_node(self, tank_id):
+        return self.tank_runtime_state(tank_id)["shot_mount"]
+
+    def tank_aim_mount_node(self, tank_id):
+        return self.tank_runtime_state(tank_id)["aim_mount"]
 
     def tank_body_pos(self, tank_id):
         return Point3(self.tank_body_node(tank_id).getPos(render))
@@ -1630,6 +1751,32 @@ class MyApp(ShowBase):
             body_pos[1],
             self.terrain_z(body_pos[0], body_pos[1]) + PLAYER_CAMERA_HEIGHT + PLAYER_HIT_COLLISION_CENTER_Z
         )
+
+    def tank_shot_start_local(self, tank_id):
+        return Point3(self.tank_runtime_state(tank_id)["shot_start_local"])
+
+    def tank_shot_stowed_local(self, tank_id):
+        return Point3(self.tank_runtime_state(tank_id)["shot_stowed_local"])
+
+    def tank_shot_stowed_hpr(self, tank_id):
+        return Point3(self.tank_runtime_state(tank_id)["shot_stowed_hpr"])
+
+    def tank_aim_point_local(self, tank_id):
+        runtime = self.tank_runtime_state(tank_id)
+        reference = Point3(runtime["aim_reference_local"])
+        tilt_radians = math.radians(self.tank_barrel_tilt(tank_id))
+        reference[2] = runtime.get("aim_height", 0.0) + math.tan(tilt_radians) * PLAYER_BARREL_AIM_REFERENCE_DISTANCE
+        return reference
+
+    def tank_shot_direction(self, tank_id, shot_start):
+        aim_world = render.getRelativePoint(self.tank_aim_mount_node(tank_id), self.tank_aim_point_local(tank_id))
+        return self.normalize3(aim_world - shot_start)
+
+    def tank_collision_start(self, tank_id, shot_start, shot_direction):
+        backtrace = self.tank_runtime_state(tank_id).get("collision_backtrace", 0)
+        if backtrace <= 0:
+            return None
+        return Point3(shot_start - shot_direction * backtrace)
 
     def tank_is_shooting(self, tank_id):
         if tank_id == "0":
@@ -1885,7 +2032,7 @@ class MyApp(ShowBase):
         if tank_id == "0":
             if getattr(self, "player_tank_visual_hidden_for_effect", False):
                 body_np.hide()
-            elif self.is_network_client_controller():
+            elif self.is_network_client_controller() and NETWORK_TANK_ID != "0":
                 body_np.show(MAIN_CAMERA_MASK)
             else:
                 body_np.hide(MAIN_CAMERA_MASK)
@@ -2309,12 +2456,19 @@ class MyApp(ShowBase):
         hit_height = hit_point[2] - self.terrain_z(hit_point[0], hit_point[1])
         return hit_height <= PLAYER_HIT_MAX_HEIGHT_ABOVE_GROUND
 
+    def player_tank_is_hittable(self):
+        if self.game_over or self.player_lives <= 0:
+            return False
+        if getattr(self, "player_tank_visual_hidden_for_effect", False):
+            return False
+        return True
+
     def struck(self, entry):
         if self.is_network_client_controller():
             return
 
         now = ClockObject.getGlobalClock().getFrameTime()
-        if self.investigation_mode or self.game_over or now - self.last_player_hit_time < PLAYER_HIT_COOLDOWN:
+        if self.investigation_mode or not self.player_tank_is_hittable() or now - self.last_player_hit_time < PLAYER_HIT_COOLDOWN:
             return
 
         from_name = entry.getFromNodePath().node().name
@@ -2354,7 +2508,7 @@ class MyApp(ShowBase):
 
     def register_incoming_player_tank_hit(self, shooter_id, shot_start, shot_end):
         now = ClockObject.getGlobalClock().getFrameTime()
-        if self.investigation_mode or self.game_over or now - self.last_player_hit_time < PLAYER_HIT_COOLDOWN:
+        if self.investigation_mode or not self.player_tank_is_hittable() or now - self.last_player_hit_time < PLAYER_HIT_COOLDOWN:
             return
         if shooter_id not in tanks_list:
             return
@@ -2434,8 +2588,8 @@ class MyApp(ShowBase):
         if not getattr(self, "player_tank_visual_hidden_for_effect", False):
             return
         self.player_tank_visual_hidden_for_effect = False
+        self.player_tank_visual.show()
         if self.is_network_client_controller():
-            self.player_tank_visual.show()
             self.player_tank_visual.show(MAIN_CAMERA_MASK)
         else:
             self.player_tank_visual.hide(MAIN_CAMERA_MASK)
@@ -2483,6 +2637,7 @@ class MyApp(ShowBase):
         client_controller = self.is_network_client_controller()
         client_low_render = self.is_network_client_low_render()
         client_snapshot = self.network_client_has_snapshot()
+        server_authority = self.is_network_server_authority()
 
         if hasattr(self, "obstacle_group"):
             if (waiting or client_controller) and not client_snapshot:
@@ -2491,13 +2646,13 @@ class MyApp(ShowBase):
                 self.obstacle_group.show()
 
         if hasattr(self, "radar_np"):
-            if waiting or client_controller:
+            if waiting or client_controller or server_authority:
                 self.radar_np.hide()
             else:
                 self.radar_np.show()
 
         if hasattr(self, "sight_clear_np"):
-            sight_visible = not waiting and (not client_controller or client_snapshot)
+            sight_visible = not server_authority and not waiting and (not client_controller or client_snapshot)
             if not sight_visible:
                 self.sight_clear_np.hide()
                 self.sight_engaged_np.hide()
@@ -2507,9 +2662,9 @@ class MyApp(ShowBase):
                 self.sight_clear_np.show()
                 self.update_barrel_aim_marker()
 
-        self.set_auxiliary_views_visible(((not waiting and not client_controller) or client_snapshot) and not client_low_render)
-        self.set_drone_view_visible(not waiting and not client_controller and not client_low_render)
-        self.set_environment_preview_visible(waiting and not client_controller)
+        self.set_auxiliary_views_visible(not server_authority and ((not waiting and not client_controller) or client_snapshot) and not client_low_render)
+        self.set_drone_view_visible(not server_authority and not waiting and not client_controller and not client_low_render)
+        self.set_environment_preview_visible(waiting and not client_controller and not server_authority)
 
     def set_auxiliary_views_visible(self, visible):
         if hasattr(self, "panorama_overlay_region"):
@@ -2666,6 +2821,7 @@ class MyApp(ShowBase):
         self.player_lives = PLAYER_MAX_LIVES
         self.last_player_hit_time = -PLAYER_HIT_COOLDOWN
         self.hit_flash_alpha = 0
+        self.player_tank_visual_hidden_for_effect = False
         self.gameOverTextObject.hide()
         self.startTextObject.hide()
         for text_object in getattr(self, "environmentNameTextObjects", []):
@@ -2678,6 +2834,8 @@ class MyApp(ShowBase):
         self.camera.setPos(render, self.terrain_position(Point3(0, 0, 0), PLAYER_CAMERA_HEIGHT))
         self.camera.setHpr(0, 0, 0)
         self.set_player_camera_on_terrain()
+        self.player_tank_visual.show()
+        self.player_tank_visual.hide(MAIN_CAMERA_MASK)
         self.player_barrel_tilt = 0.0
         for t in tanks_list:
             tanks_dict[t]["barrel_tilt"] = 0.0
@@ -2947,7 +3105,7 @@ class MyApp(ShowBase):
             self.levelShotMarkerNp.hide()
             return
 
-        aim_point = self.player_barrel_aim_point_local()
+        aim_point = self.tank_aim_point_local("0")
         projected = Point2()
         if aim_point[1] <= 0 or not self.camLens.project(aim_point, projected):
             self.sightRootNp.hide()
@@ -3031,6 +3189,7 @@ class MyApp(ShowBase):
         self.investigation_mode = False
         self.investigation_available_until = 0
         self.last_player_hit_event = None
+        self.player_tank_visual_hidden_for_effect = False
         self.investigation_saved_camera_pos = None
         self.investigation_saved_camera_hpr = None
         self.investigation_marker_root = None
@@ -3148,7 +3307,7 @@ class MyApp(ShowBase):
         return "{}:{}".format(t, getattr(controller, "debug_state", ""))
 
     def updateTankHudLabelsTask(self, task):
-        if self.waiting_to_start or self.is_network_client_low_render():
+        if self.waiting_to_start or self.is_network_client_low_render() or self.is_network_server_authority():
             for t in tanks_list:
                 self.hide_tank_hud_label(t)
             return Task.cont
@@ -3463,6 +3622,9 @@ class MyApp(ShowBase):
             node.hide(camera_mask)
 
     def updateAuxiliaryViewsTask(self, task):
+        if self.is_network_server_authority():
+            return Task.cont
+
         if self.is_network_client_low_render():
             return Task.cont
 
@@ -3644,6 +3806,9 @@ class MyApp(ShowBase):
         self.update_drone_status_hud()
 
     def updateReconDroneTask(self, task):
+        if self.is_network_server_authority():
+            return Task.cont
+
         if self.is_network_client_low_render():
             return Task.cont
 
@@ -4016,6 +4181,9 @@ class MyApp(ShowBase):
         return closest_hit
 
     def find_incoming_player_tank_hit(self, start, end, minimum_t=0.0):
+        if not self.player_tank_is_hittable():
+            return None
+
         center = self.player_tank_body_target()
         hit = self.segment_sphere_hit(start, end, center, PLAYER_NETWORK_HIT_RADIUS)
         if not hit:
@@ -4127,6 +4295,20 @@ class MyApp(ShowBase):
             return 1.0
         return hit["t"]
 
+    def tank_barrel_tilt_to_target(self, tank_id, target):
+        local_target = self.tank_aim_mount_node(tank_id).getRelativePoint(render, target)
+        runtime = self.tank_runtime_state(tank_id)
+        forward_distance = local_target[1] if runtime.get("aim_forward_axis", "x") == "y" else local_target[0]
+        forward_distance = max(0.001, forward_distance)
+        height_delta = local_target[2] - runtime.get("aim_height", 0.0)
+        return max(
+            PLAYER_BARREL_TILT_MIN,
+            min(PLAYER_BARREL_TILT_MAX, math.degrees(math.atan2(height_delta, forward_distance)))
+        )
+
+    def tank_barrel_tilt_error(self, tank_id, target):
+        return self.tank_barrel_tilt_to_target(tank_id, target) - self.tank_barrel_tilt(tank_id)
+
     def build_tank_observation(self, tank_id):
         tank_np = self.tank_body_node(tank_id)
         tank_pos = Point3(tank_np.getPos(render))
@@ -4138,6 +4320,8 @@ class MyApp(ShowBase):
         heading_to_player = math.degrees(math.atan2(player_dy, player_dx))
         tank_heading = tank_np.getH(render)
         aim_error = signed_angular_delta_degrees(heading_to_player, tank_heading)
+        barrel_tilt_target = self.tank_barrel_tilt_to_target(tank_id, player_body_pos)
+        barrel_tilt_error = barrel_tilt_target - self.tank_barrel_tilt(tank_id)
         line_of_sight_clear_fraction = self.tank_line_of_sight_clear_fraction(tank_pos, player_body_pos)
         line_of_sight = line_of_sight_clear_fraction >= 1.0
 
@@ -4152,6 +4336,8 @@ class MyApp(ShowBase):
             "distance_to_player": distance,
             "heading_to_player": heading_to_player,
             "aim_error": aim_error,
+            "barrel_tilt_target": barrel_tilt_target,
+            "barrel_tilt_error": barrel_tilt_error,
             "line_of_sight": line_of_sight,
             "line_of_sight_clear_fraction": line_of_sight_clear_fraction,
             "risky_line_of_sight": line_of_sight_clear_fraction >= TACTICAL_AI_RISKY_SHOT_CLEAR_FRACTION,
@@ -4374,51 +4560,23 @@ class MyApp(ShowBase):
             tanks_dict[tank_id]["barrel_tilt"] = value
 
     def apply_barrel_tilt_command(self, tank_id, command, dt):
+        if command.desired_barrel_tilt is not None:
+            next_tilt = self.approach_value(
+                self.tank_barrel_tilt(tank_id),
+                command.desired_barrel_tilt,
+                PLAYER_BARREL_TILT_RATE * dt
+            )
+            self.set_tank_barrel_tilt(tank_id, next_tilt)
+            return
+
         if not command.barrel_tilt:
             return
 
         tilt_step = PLAYER_BARREL_TILT_RATE * dt * command.barrel_tilt
         self.set_tank_barrel_tilt(tank_id, self.tank_barrel_tilt(tank_id) + tilt_step)
 
-    def player_barrel_aim_point_local(self):
-        reference_distance = PLAYER_BARREL_AIM_REFERENCE_DISTANCE
-        tilt_radians = math.radians(getattr(self, "player_barrel_tilt", 0.0))
-        return Point3(
-            0,
-            reference_distance,
-            math.tan(tilt_radians) * reference_distance
-        )
-
-    def player_shot_direction(self, shot_start):
-        aim_world = render.getRelativePoint(self.camera, self.player_barrel_aim_point_local())
-        return self.normalize3(aim_world - shot_start)
-
-    def tank_barrel_aim_point_local(self, tank_id):
-        reference_distance = PLAYER_BARREL_AIM_REFERENCE_DISTANCE
-        tilt_radians = math.radians(self.tank_barrel_tilt(tank_id))
-        return Point3(
-            reference_distance,
-            0,
-            math.tan(tilt_radians) * reference_distance + 1.61325
-        )
-
-    def tank_shot_direction(self, tank_id, shot_start):
-        aim_world = render.getRelativePoint(self.tank_body_node(tank_id), self.tank_barrel_aim_point_local(tank_id))
-        return self.normalize3(aim_world - shot_start)
-
     def player_tank_body_target(self):
         return self.tank_body_target("0")
-
-    def enemy_shot_direction(self, t, shot_start):
-        target = self.player_tank_body_target()
-        base_dir = self.normalize3(target - shot_start)
-        lateral = self.normalize3(Point3(-base_dir[1], base_dir[0], 0))
-        target = Point3(
-            target[0] + lateral[0] * (random() - 0.5) * TACTICAL_AI_SHOT_LATERAL_JITTER,
-            target[1] + lateral[1] * (random() - 0.5) * TACTICAL_AI_SHOT_LATERAL_JITTER,
-            target[2] + (random() - 0.5) * TACTICAL_AI_SHOT_VERTICAL_JITTER
-        )
-        return self.normalize3(target - shot_start)
 
     def apply_direct_tank_command(self, t, command, dt):
         if not tanks_dict[t]["move"] or self.tank_avatars[t].is_hidden():
@@ -4448,6 +4606,8 @@ class MyApp(ShowBase):
     def apply_autonomous_tank_command(self, t, command, dt):
         if command.desired_world_pos is None:
             return
+
+        self.apply_barrel_tilt_command(t, command, dt)
 
         locator = tanks_dict[t]["Locator"]
         tank_np = tanks_dict[t]["tank"]
@@ -4497,8 +4657,10 @@ class MyApp(ShowBase):
 
     def prepare_tank_shot(self, tank_id):
         shot_np = self.tank_shot_node(tank_id)
+        shot_np.reparentTo(self.tank_shot_mount_node(tank_id))
+        shot_np.setPos(self.tank_shot_start_local(tank_id))
+        shot_np.setHpr(self.tank_shot_stowed_hpr(tank_id))
         if tank_id == "0":
-            shot_np.setPos(0, PLAYER_SHOT_START_Y, PLAYER_SHOT_START_Z)
             self.sight_engaged_np.show()
             self.sight_clear_np.hide()
         else:
@@ -4531,29 +4693,34 @@ class MyApp(ShowBase):
         sound.play()
         return shot_end
 
+    def fire_tank(self, tank_id, sound=None, direction=None, shot_start=None):
+        runtime = self.tank_runtime_state(tank_id)
+        if shot_start is None:
+            shot_start = self.prepare_tank_shot(tank_id)
+        shot_direction = direction if direction is not None else self.tank_shot_direction(tank_id, shot_start)
+        collision_start = self.tank_collision_start(tank_id, shot_start, shot_direction)
+        if sound is None:
+            sound = self.mainShot_snd if runtime.get("is_player", False) else self.enemyShot_snd
+        return self.fire_tank_shot(
+            tank_id,
+            shot_direction,
+            runtime.get("shot_distance", 300),
+            runtime.get("shot_duration", 1.0),
+            sound,
+            collision_start,
+            shot_start
+        )
+        if tank_id != "0":
+            self.set_tank_attack_cooldown(tank_id, runtime.get("fire_cooldown", TANK_FIRE_COOLDOWN))
+        return shot_end
+
     def fire_enemy_tank(self, t):
         print('Tank {} shooting'.format(t))
-        shot_start = self.prepare_tank_shot(t)
-        self.fire_tank_shot(
-            t,
-            self.enemy_shot_direction(t, shot_start),
-            300,
-            1,
-            self.enemyShot_snd,
-            shot_start=shot_start
-        )
+        self.fire_tank(t, self.enemyShot_snd)
 
     def fire_remote_tank(self, t):
         print('Remote tank {} shooting'.format(t))
-        shot_start = self.prepare_tank_shot(t)
-        self.fire_tank_shot(
-            t,
-            self.tank_shot_direction(t, shot_start),
-            300,
-            1,
-            self.mainShot_snd,
-            shot_start=shot_start
-        )
+        self.fire_tank(t, self.mainShot_snd)
 
     def reset_tank_shot(self, tank_id):
         shot_interval = self.tank_shot_interval(tank_id)
@@ -4564,15 +4731,12 @@ class MyApp(ShowBase):
 
         self.set_tank_shot_deflected(tank_id, False)
         shot_np = self.tank_shot_node(tank_id)
+        shot_np.reparentTo(self.tank_shot_mount_node(tank_id))
+        shot_np.setPos(self.tank_shot_stowed_local(tank_id))
+        shot_np.setHpr(self.tank_shot_stowed_hpr(tank_id))
         if tank_id == "0":
             shot_np.hide()
-            shot_np.reparentTo(self.camera)
-            shot_np.setPos(0, PLAYER_SHOT_START_Y, PLAYER_SHOT_START_Z - 10)
-            shot_np.setHpr(0, 90, 0)
         else:
-            shot_np.reparentTo(self.tank_body_node(tank_id))
-            shot_np.setPos(-0.4, 0, 1.61325)
-            shot_np.setHpr(0, 0, 90)
             shot_np.show()
             self.set_tank_shooting(tank_id, False)
 
@@ -4590,7 +4754,7 @@ class MyApp(ShowBase):
             self.start_game()
             return
 
-        if self.game_over or self.investigation_mode:
+        if self.game_over or self.investigation_mode or not self.player_tank_is_hittable():
             return
 
         if self.tank_shot_interval("0") is not None:
@@ -4615,24 +4779,13 @@ class MyApp(ShowBase):
             self.start_game()
             return
 
-        if self.game_over or self.investigation_mode:
+        if self.game_over or self.investigation_mode or not self.player_tank_is_hittable():
             return
 
         if self.tank_shot_interval("0") is not None:
             return
 
-        shot_start = self.prepare_tank_shot("0")
-        shoot_at = self.player_shot_direction(shot_start)
-        collision_start = Point3(shot_start - shoot_at * PLAYER_SHOT_BACKTRACE_DISTANCE)
-        self.fire_tank_shot(
-            "0",
-            shoot_at,
-            200,
-            1.1,
-            self.mainShot_snd,
-            collision_start,
-            shot_start
-        )
+        self.fire_tank("0", self.mainShot_snd)
         return
 
     def tank0_round_hit(self, entry):
@@ -4653,6 +4806,9 @@ class MyApp(ShowBase):
         return
 
     def updateRadarTask(self, task):
+        if self.is_network_server_authority():
+            return Task.cont
+
         if self.waiting_to_start or self.is_network_client_controller():
             return Task.cont
 
