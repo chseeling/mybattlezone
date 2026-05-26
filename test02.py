@@ -1532,6 +1532,10 @@ class MyApp(ShowBase):
                 "body": self.player_tank_visual,
                 "control": self.camera,
                 "shot": self.tank_round[0],
+                "eye_height": PLAYER_CAMERA_HEIGHT,
+                "view_heading_offset": -90,
+                "body_heading_offset": 90,
+                "body_forward_axis": "x",
                 "is_player": True
             }
         }
@@ -1541,6 +1545,10 @@ class MyApp(ShowBase):
                 "control": tanks_dict[t]["tank"],
                 "shot": tanks_dict[t]["round"],
                 "locator": tanks_dict[t]["Locator"],
+                "eye_height": PLAYER_CAMERA_HEIGHT,
+                "view_heading_offset": -90,
+                "body_heading_offset": 0,
+                "body_forward_axis": "x",
                 "is_player": False
             }
 
@@ -1555,6 +1563,73 @@ class MyApp(ShowBase):
 
     def tank_shot_node(self, tank_id):
         return self.tank_runtime_state(tank_id)["shot"]
+
+    def tank_body_pos(self, tank_id):
+        return Point3(self.tank_body_node(tank_id).getPos(render))
+
+    def tank_body_hpr(self, tank_id):
+        return self.tank_body_node(tank_id).getHpr(render)
+
+    def tank_control_pos(self, tank_id):
+        return Point3(self.tank_control_node(tank_id).getPos(render))
+
+    def tank_control_heading(self, tank_id):
+        return self.tank_control_node(tank_id).getH(render)
+
+    def tank_body_heading(self, tank_id):
+        return self.tank_body_node(tank_id).getH(render)
+
+    def tank_body_pose_from_control(self, tank_id):
+        runtime = self.tank_runtime_state(tank_id)
+        control_pos = self.tank_control_pos(tank_id)
+        control_heading = self.tank_control_heading(tank_id)
+        body_heading = control_heading + runtime.get("body_heading_offset", 0)
+        surface_pos = self.terrain_position(control_pos)
+        surface_hpr = self.terrain_surface_hpr(
+            surface_pos[0],
+            surface_pos[1],
+            body_heading,
+            runtime.get("body_forward_axis", "x")
+        )
+        return surface_pos, surface_hpr
+
+    def sync_tank_body_to_control(self, tank_id):
+        body_pos, body_hpr = self.tank_body_pose_from_control(tank_id)
+        body_np = self.tank_body_node(tank_id)
+        body_np.setPos(render, body_pos)
+        body_np.setHpr(render, *body_hpr)
+
+    def tank_eye_pos_from_body_pos(self, tank_id, body_pos):
+        runtime = self.tank_runtime_state(tank_id)
+        return Point3(
+            body_pos[0],
+            body_pos[1],
+            self.terrain_z(body_pos[0], body_pos[1]) + runtime.get("eye_height", PLAYER_CAMERA_HEIGHT)
+        )
+
+    def tank_view_state_from_body_state(self, tank_id, state):
+        if state is None:
+            return None
+
+        pos = self.snapshot_state_point(state, "pos")
+        hpr = self.snapshot_state_hpr(state)
+        runtime = self.tank_runtime_state(tank_id)
+        eye_pos = self.tank_eye_pos_from_body_pos(tank_id, pos)
+        return {
+            "pos": self.point_to_list(eye_pos),
+            "hpr": [hpr[0] + runtime.get("view_heading_offset", 0), hpr[1], hpr[2]],
+            "barrel_tilt": state.get("barrel_tilt", 0.0),
+            "hidden": state.get("hidden", False),
+            "shooting": state.get("shooting", False)
+        }
+
+    def tank_body_target(self, tank_id):
+        body_pos = self.tank_body_pos(tank_id)
+        return Point3(
+            body_pos[0],
+            body_pos[1],
+            self.terrain_z(body_pos[0], body_pos[1]) + PLAYER_CAMERA_HEIGHT + PLAYER_HIT_COLLISION_CENTER_Z
+        )
 
     def tank_is_shooting(self, tank_id):
         if tank_id == "0":
@@ -1631,12 +1706,7 @@ class MyApp(ShowBase):
         if not hasattr(self, "player_tank_visual"):
             return
 
-        camera_pos = self.camera.getPos(render)
-        camera_heading = self.camera.getH(render)
-        surface_pos = self.terrain_position(camera_pos)
-        visual_hpr = self.terrain_surface_hpr(surface_pos[0], surface_pos[1], camera_heading + 90, "x")
-        self.player_tank_visual.setPos(render, surface_pos)
-        self.player_tank_visual.setHpr(render, *visual_hpr)
+        self.sync_tank_body_to_control("0")
         if self.is_network_client_controller():
             self.player_tank_visual.show(MAIN_CAMERA_MASK)
         else:
@@ -1644,19 +1714,7 @@ class MyApp(ShowBase):
 
     def network_view_state_for_tank(self, tank_id, tank_states):
         state = tank_states.get(tank_id) or tank_states.get("0")
-        if tank_id == "0" or state is None:
-            return state
-
-        pos = self.snapshot_state_point(state, "pos")
-        hpr = self.snapshot_state_hpr(state)
-        eye_pos = Point3(pos[0], pos[1], self.terrain_z(pos[0], pos[1]) + PLAYER_CAMERA_HEIGHT)
-        return {
-            "pos": self.point_to_list(eye_pos),
-            "hpr": [hpr[0] - 90, hpr[1], hpr[2]],
-            "barrel_tilt": state.get("barrel_tilt", 0.0),
-            "hidden": state.get("hidden", False),
-            "shooting": state.get("shooting", False)
-        }
+        return self.tank_view_state_from_body_state(tank_id, state)
 
     def build_network_snapshot(self, task_time):
         self.update_player_tank_visual()
@@ -1971,8 +2029,8 @@ class MyApp(ShowBase):
             "shot_end": Point3(shot_end),
             "shooter_pos": Point3(shooter_pos),
             "shooter_hpr": shooter_hpr,
-            "player_pos": Point3(self.camera.getPos(render)),
-            "player_hpr": self.camera.getHpr(render),
+            "player_pos": self.tank_body_pos("0"),
+            "player_hpr": self.tank_body_hpr("0"),
             "fatal": False
         }
         self.investigation_available_until = (
@@ -2067,7 +2125,7 @@ class MyApp(ShowBase):
         hit_marker_pos[2] = 0
         hit_marker = self.investigation_marker_root.attachNewNode("InvestigationPlayerAtHit")
         hit_marker.setPos(render, hit_marker_pos)
-        hit_marker.setHpr(render, event["player_hpr"][0] + 90, 0, 0)
+        hit_marker.setHpr(render, event["player_hpr"])
         self.tank.instanceTo(hit_marker)
         hit_marker.setColorScale(0.05, 0.35, 1.0, 1)
 
@@ -2536,6 +2594,7 @@ class MyApp(ShowBase):
         self.camera.setPos(render, self.terrain_position(pos, PLAYER_CAMERA_HEIGHT))
         hpr = self.terrain_surface_hpr(pos[0], pos[1], heading, "y")
         self.camera.setHpr(render, hpr[0], hpr[1], hpr[2])
+        self.sync_tank_body_to_control("0")
 
     def obstacle_surface_pos(self, obstacle):
         return self.terrain_position(obstacle["pos"])
@@ -4069,9 +4128,9 @@ class MyApp(ShowBase):
         return hit["t"]
 
     def build_tank_observation(self, tank_id):
-        tank_np = tanks_dict[tank_id]["tank"]
+        tank_np = self.tank_body_node(tank_id)
         tank_pos = Point3(tank_np.getPos(render))
-        player_pos = Point3(self.camera.getPos(render))
+        player_pos = self.tank_body_pos("0")
         player_body_pos = self.player_tank_body_target()
         player_dx = player_pos[0] - tank_pos[0]
         player_dy = player_pos[1] - tank_pos[1]
@@ -4344,16 +4403,11 @@ class MyApp(ShowBase):
         )
 
     def tank_shot_direction(self, tank_id, shot_start):
-        aim_world = render.getRelativePoint(tanks_dict[tank_id]["tank"], self.tank_barrel_aim_point_local(tank_id))
+        aim_world = render.getRelativePoint(self.tank_body_node(tank_id), self.tank_barrel_aim_point_local(tank_id))
         return self.normalize3(aim_world - shot_start)
 
     def player_tank_body_target(self):
-        player_pos = self.camera.getPos(render)
-        return Point3(
-            player_pos[0],
-            player_pos[1],
-            self.terrain_z(player_pos[0], player_pos[1]) + PLAYER_CAMERA_HEIGHT + PLAYER_HIT_COLLISION_CENTER_Z
-        )
+        return self.tank_body_target("0")
 
     def enemy_shot_direction(self, t, shot_start):
         target = self.player_tank_body_target()
