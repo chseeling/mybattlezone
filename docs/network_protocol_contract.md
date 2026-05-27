@@ -469,7 +469,7 @@ The server dashboard state is shared by multiple operator surfaces:
 - `BATTLEZONE_SERVER_UI=logs`: JSON event and periodic status logs for hosted/headless-style deployment.
 - `BATTLEZONE_SERVER_UI=none`: suppresses operator console output.
 
-`logs` mode emits immediate event records and periodic status records using `BATTLEZONE_SERVER_LOG_INTERVAL` seconds.
+`logs` mode emits immediate event records and periodic status records using `BATTLEZONE_SERVER_LOG_INTERVAL` seconds. Non-Panda server UI modes minimize the Panda server window by default; `BATTLEZONE_SERVER_WINDOW=visible` keeps it visible for inspection.
 
 Benefit: the same arena status contract can support local terminal operation and managed server logs without coupling deployment to curses.
 

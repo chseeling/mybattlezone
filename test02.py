@@ -158,6 +158,7 @@ NETWORK_SERVER_LOW_RENDER = os.environ.get("BATTLEZONE_NET_SERVER_LOW_RENDER", "
 NETWORK_SERVER_LOW_RENDER_SIZE = (720, 405)
 SERVER_UI_MODE = configured_server_ui_mode()
 SERVER_TUI_WINDOW_MODE = os.environ.get("BATTLEZONE_SERVER_TUI_WINDOW", "minimized").lower()
+SERVER_WINDOW_MODE = os.environ.get("BATTLEZONE_SERVER_WINDOW", SERVER_TUI_WINDOW_MODE).lower()
 SERVER_LOG_INTERVAL = float(os.environ.get("BATTLEZONE_SERVER_LOG_INTERVAL", "5.0"))
 AUDIO_FOCUS_MUTE_DEFAULT = "0" if (
     NETWORK_MODE == "client" and
@@ -2817,8 +2818,15 @@ class MyApp(ShowBase):
     def server_log_enabled(self):
         return self.is_network_server_authority() and SERVER_UI_MODE in {"log", "logs", "json", "headless"}
 
+    def server_window_minimized_by_default(self):
+        return self.is_network_server_authority() and SERVER_UI_MODE in {
+            "tui", "log", "logs", "json", "headless", "none", "off"
+        }
+
     def operator_console_enabled(self):
-        return not (self.is_network_server_authority() and SERVER_UI_MODE in {"tui", "none", "off"})
+        return not (self.is_network_server_authority() and SERVER_UI_MODE in {
+            "tui", "log", "logs", "json", "headless", "none", "off"
+        })
 
     def setup_server_operator_ui(self):
         if not self.is_network_server_authority():
@@ -3286,10 +3294,13 @@ class MyApp(ShowBase):
 
         props = WindowProperties()
         props.setSize(*NETWORK_SERVER_LOW_RENDER_SIZE)
-        if self.is_network_server_authority() and SERVER_UI_MODE == "tui":
+        if self.is_network_server_authority() and SERVER_UI_MODE != "panda":
             if hasattr(props, "setTitle"):
-                props.setTitle("Battlezone Server Backend")
-            if SERVER_TUI_WINDOW_MODE in {"minimized", "minimize", "min"} and hasattr(props, "setMinimized"):
+                props.setTitle("Battlezone Server")
+            if (
+                    self.server_window_minimized_by_default() and
+                    SERVER_WINDOW_MODE in {"minimized", "minimize", "min"} and
+                    hasattr(props, "setMinimized")):
                 props.setMinimized(True)
         base.win.requestProperties(props)
         self.set_bloom_enabled(False)

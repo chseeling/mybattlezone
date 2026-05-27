@@ -49,6 +49,8 @@ $env:BATTLEZONE_SERVER_LOG_INTERVAL="5"
 python test02.py
 ```
 
+In `tui`, `logs`, `headless`, and `none` server UI modes, the Panda server window is minimized by default. Set `$env:BATTLEZONE_SERVER_WINDOW="visible"` before launch if you want to inspect the server render window.
+
 Tank 0 human client on the same machine:
 
 ```powershell
