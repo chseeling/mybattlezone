@@ -4711,7 +4711,20 @@ class MyApp(ShowBase):
         self.clientLobbyRows["control"].setFg(authority_color)
 
     def render_client_lobby_panel(self):
-        self.clientLobbyRoot = aspect2d.attachNewNode("ClientLobbyPanel")
+        self.clientLobbyLayerRoot = NodePath("ClientLobbyLayer")
+        lobby_camera_node = Camera("ClientLobbyCamera")
+        lobby_camera_node.setLens(base.cam2d.node().getLens())
+        lobby_camera_node.setScene(self.clientLobbyLayerRoot)
+        self.clientLobbyCamera = NodePath(lobby_camera_node)
+        self.clientLobbyRegion = base.win.makeDisplayRegion(0, 1, 0, 1)
+        self.clientLobbyRegion.setSort(60)
+        self.clientLobbyRegion.setClearColorActive(False)
+        self.clientLobbyRegion.setClearDepthActive(False)
+        self.clientLobbyRegion.setCamera(self.clientLobbyCamera)
+
+        self.clientLobbyAspectRoot = self.clientLobbyLayerRoot.attachNewNode("ClientLobbyAspect")
+        self.clientLobbyAspectRoot.setTransform(aspect2d.getTransform(render2d))
+        self.clientLobbyRoot = self.clientLobbyAspectRoot.attachNewNode("ClientLobbyPanel")
         self.clientLobbyRoot.setPos(-1.24, 0, 0.58)
 
         panel = CardMaker("client-lobby-panel")
