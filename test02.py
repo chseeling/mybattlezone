@@ -144,6 +144,9 @@ NETWORK_PROTOCOL_VERSION = 1
 NETWORK_SEND_RATE = 30.0
 NETWORK_JOIN_RATE = 1.0
 NETWORK_SNAPSHOT_RATE = 25.0
+NETWORK_COMMAND_RETRY_RATE = 8.0
+NETWORK_COMMAND_HISTORY_LIMIT = 256
+NETWORK_PENDING_COMMAND_LIMIT = 64
 NETWORK_SMOOTHING_RATE = 14.0
 NETWORK_RENDER_DELAY = 0.08
 NETWORK_EFFECT_DELAY = NETWORK_RENDER_DELAY
@@ -847,6 +850,8 @@ class UdpTankInputBridge:
         self.client_claim_tokens = {}
         self.client_claim_generations = {}
         self.client_last_input_sequences = {}
+        self.processed_host_command_acks = {}
+        self.processed_host_command_order = []
         self.tank_claim_generation_counters = {}
         self.next_player_number = 1
         self.join_accepted = False
@@ -855,6 +860,9 @@ class UdpTankInputBridge:
         self.claim_token = ""
         self.ownership_generation = 0
         self.client_sequence = 0
+        self.client_command_sequence = 0
+        self.pending_client_commands = {}
+        self.pending_client_command_order = []
         self.last_join_send_time = -999
         self.last_send_time = 0
         self.last_snapshot_time = 0
@@ -911,6 +919,7 @@ class UdpTankInputBridge:
             self.expire_client_claim(task_time)
             self.send_client_join(task_time)
             self.send_client_input(task_time)
+            self.resend_pending_client_commands(task_time)
 
     def receive_host_packets(self, task_time):
         while True:
@@ -945,6 +954,9 @@ class UdpTankInputBridge:
                 continue
             if message_type == "terrain":
                 self.handle_host_terrain(message, addr)
+                continue
+            if message_type == "command":
+                self.handle_host_command(message, addr)
                 continue
 
             if message_type != "input":
@@ -1143,6 +1155,102 @@ class UdpTankInputBridge:
         player_id = self.client_player_ids.get(tank_id, "")
         self.app.request_lobby_terrain_change(player_id, tank_id, action, index)
 
+    def command_ack_payload(self, tank_id, command_id, accepted, reason="", result=None):
+        return {
+            "type": "command_ack",
+            "protocol": NETWORK_PROTOCOL_VERSION,
+            "tank_id": str(tank_id),
+            "command_id": str(command_id),
+            "accepted": bool(accepted),
+            "reason": str(reason or ""),
+            "result": result or {}
+        }
+
+    def send_host_command_ack_payload(self, addr, payload):
+        try:
+            self.socket.sendto(json.dumps(payload).encode("utf-8"), addr)
+        except OSError:
+            pass
+
+    def remember_host_command_ack(self, command_id, ack_payload):
+        self.processed_host_command_acks[command_id] = ack_payload
+        self.processed_host_command_order.append(command_id)
+        while len(self.processed_host_command_order) > NETWORK_COMMAND_HISTORY_LIMIT:
+            stale_command_id = self.processed_host_command_order.pop(0)
+            if stale_command_id not in self.processed_host_command_order:
+                self.processed_host_command_acks.pop(stale_command_id, None)
+
+    def handle_host_command(self, message, addr):
+        tank_id = str(message.get("tank_id", self.tank_id))
+        command_id = str(message.get("command_id", ""))
+        if tank_id not in network_tank_ids():
+            return
+        if not self.host_claim_identity_matches(tank_id, addr, message):
+            return
+        if not command_id:
+            ack = self.command_ack_payload(tank_id, "", False, "missing command id")
+            self.send_host_command_ack_payload(addr, ack)
+            return
+
+        existing_ack = self.processed_host_command_acks.get(command_id)
+        if existing_ack is not None:
+            self.send_host_command_ack_payload(addr, existing_ack)
+            return
+
+        accepted, reason, result = self.dispatch_host_command(tank_id, message)
+        ack = self.command_ack_payload(tank_id, command_id, accepted, reason, result)
+        self.remember_host_command_ack(command_id, ack)
+        self.send_host_command_ack_payload(addr, ack)
+
+    def dispatch_host_command(self, tank_id, message):
+        command = str(message.get("command", ""))
+        payload = message.get("payload", {})
+        if not isinstance(payload, dict):
+            payload = {}
+
+        if command == "start":
+            self.app.start_game()
+            return True, "", {}
+
+        if command == "restart":
+            if tank_id != "0":
+                return False, "restart requires tank 0", {}
+            self.app.restart_game()
+            return True, "", {}
+
+        if command == "enemy_fire":
+            if tank_id != "0":
+                return False, "enemy fire toggle requires tank 0", {}
+            self.app.set_enemy_shooting_suspended(bool(payload.get("suspended", False)))
+            return True, "", {"suspended": self.app.enemy_shooting_suspended}
+
+        if command == "investigation":
+            if tank_id != "0":
+                return False, "investigation requires tank 0", {}
+            active = bool(payload.get("active", False))
+            if active:
+                if not self.app.investigation_mode:
+                    self.app.enter_investigation()
+                    self.app.record_server_event("investigation pause")
+            elif self.app.investigation_mode:
+                self.app.exit_investigation()
+                self.app.record_server_event("investigation resume")
+            return True, "", {"active": self.app.investigation_mode}
+
+        if command == "terrain":
+            action = str(payload.get("action", "set"))
+            index = payload.get("environment_index")
+            try:
+                index = None if index is None else int(index)
+            except (TypeError, ValueError):
+                index = None
+            player_id = self.client_player_ids.get(tank_id, "")
+            accepted = self.app.request_lobby_terrain_change(player_id, tank_id, action, index)
+            reason = "" if accepted else "terrain command rejected"
+            return accepted, reason, {"environment_index": self.app.environment_index}
+
+        return False, "unknown command {}".format(command or "?"), {}
+
     def connected_player_rows(self):
         by_player = {}
         for tank_id, player_id in self.client_player_ids.items():
@@ -1254,6 +1362,9 @@ class UdpTankInputBridge:
             if message_type == "join_ack":
                 self.handle_client_join_ack(message)
                 continue
+            if message_type == "command_ack":
+                self.handle_client_command_ack(message)
+                continue
 
             if message_type != "snapshot":
                 continue
@@ -1285,11 +1396,17 @@ class UdpTankInputBridge:
                     previous_token != new_claim_token or
                     previous_generation != new_ownership_generation):
                 self.client_sequence = 0
+                self.client_command_sequence = 0
+                self.pending_client_commands = {}
+                self.pending_client_command_order = []
         else:
             self.player_id = ""
             self.claim_token = ""
             self.ownership_generation = 0
             self.client_sequence = 0
+            self.client_command_sequence = 0
+            self.pending_client_commands = {}
+            self.pending_client_command_order = []
         self.app.network_join_accepted = self.join_accepted
         self.app.network_join_rejected_reason = self.join_rejected_reason
         self.app.network_connected_tanks = message.get("connected_tanks", [])
@@ -1300,6 +1417,15 @@ class UdpTankInputBridge:
         self.last_packet_time = ClockObject.getGlobalClock().getFrameTime()
         if self.app.is_network_client_controller():
             self.app.update_network_client_presentation()
+
+    def handle_client_command_ack(self, message):
+        command_id = str(message.get("command_id", ""))
+        if not command_id:
+            return
+        self.pending_client_commands.pop(command_id, None)
+        if command_id in self.pending_client_command_order:
+            self.pending_client_command_order.remove(command_id)
+        self.last_packet_time = ClockObject.getGlobalClock().getFrameTime()
 
     def send_client_join(self, task_time):
         if self.join_accepted:
@@ -1347,100 +1473,86 @@ class UdpTankInputBridge:
             pass
         self.join_accepted = False
 
-    def send_client_restart(self):
+    def send_pending_client_command(self, command_id, task_time=None, force=False):
         if self.mode != "client" or not hasattr(self, "server_addr"):
             return
-        if not self.join_accepted:
+        pending = self.pending_client_commands.get(command_id)
+        if pending is None:
+            return
+        if task_time is None:
+            task_time = ClockObject.getGlobalClock().getFrameTime()
+        if (
+                not force and
+                task_time - pending.get("last_send_time", -999) < 1.0 / NETWORK_COMMAND_RETRY_RATE):
             return
 
-        payload = {
-            "type": "restart",
-            "protocol": NETWORK_PROTOCOL_VERSION,
-            "tank_id": self.tank_id,
-            "claim_token": self.claim_token,
-            "ownership_generation": self.ownership_generation
-        }
         try:
-            self.socket.sendto(json.dumps(payload).encode("utf-8"), self.server_addr)
+            self.socket.sendto(json.dumps(pending["message"]).encode("utf-8"), self.server_addr)
+            pending["last_send_time"] = task_time
+            pending["attempts"] = pending.get("attempts", 0) + 1
         except OSError:
             self.mark_client_disconnected()
+
+    def resend_pending_client_commands(self, task_time):
+        if not self.join_accepted:
+            return
+        for command_id in list(self.pending_client_command_order):
+            self.send_pending_client_command(command_id, task_time)
+
+    def prune_pending_client_commands(self):
+        while len(self.pending_client_command_order) > NETWORK_PENDING_COMMAND_LIMIT:
+            stale_command_id = self.pending_client_command_order.pop(0)
+            self.pending_client_commands.pop(stale_command_id, None)
+
+    def send_client_command(self, command, payload=None):
+        if self.mode != "client" or not hasattr(self, "server_addr"):
+            return None
+        if not self.join_accepted:
+            return None
+
+        self.client_command_sequence += 1
+        player_id = self.player_id or "tank{}".format(self.tank_id)
+        command_id = "{}:{}:{}".format(player_id, self.ownership_generation, self.client_command_sequence)
+        message = {
+            "type": "command",
+            "protocol": NETWORK_PROTOCOL_VERSION,
+            "tank_id": self.tank_id,
+            "player_id": self.player_id,
+            "claim_token": self.claim_token,
+            "ownership_generation": self.ownership_generation,
+            "command_id": command_id,
+            "command": str(command),
+            "payload": payload or {}
+        }
+        self.pending_client_commands[command_id] = {
+            "message": message,
+            "last_send_time": -999,
+            "attempts": 0
+        }
+        self.pending_client_command_order.append(command_id)
+        self.prune_pending_client_commands()
+        self.send_pending_client_command(command_id, force=True)
+        return command_id
+
+    def send_client_restart(self):
+        self.send_client_command("restart")
 
     def send_client_start(self):
-        if self.mode != "client" or not hasattr(self, "server_addr"):
-            return
-        if not self.join_accepted:
-            return
-
-        payload = {
-            "type": "start",
-            "protocol": NETWORK_PROTOCOL_VERSION,
-            "tank_id": self.tank_id,
-            "claim_token": self.claim_token,
-            "ownership_generation": self.ownership_generation
-        }
-        try:
-            self.socket.sendto(json.dumps(payload).encode("utf-8"), self.server_addr)
-        except OSError:
-            self.mark_client_disconnected()
+        self.send_client_command("start")
 
     def send_client_enemy_fire(self, suspended):
-        if self.mode != "client" or not hasattr(self, "server_addr"):
-            return
-        if not self.join_accepted:
-            return
-
-        payload = {
-            "type": "enemy_fire",
-            "protocol": NETWORK_PROTOCOL_VERSION,
-            "tank_id": self.tank_id,
-            "claim_token": self.claim_token,
-            "ownership_generation": self.ownership_generation,
-            "suspended": bool(suspended)
-        }
-        try:
-            self.socket.sendto(json.dumps(payload).encode("utf-8"), self.server_addr)
-        except OSError:
-            self.mark_client_disconnected()
+        self.send_client_command("enemy_fire", {"suspended": bool(suspended)})
 
     def send_client_investigation(self, active):
-        if self.mode != "client" or not hasattr(self, "server_addr"):
-            return
-        if not self.join_accepted:
-            return
-
-        payload = {
-            "type": "investigation",
-            "protocol": NETWORK_PROTOCOL_VERSION,
-            "tank_id": self.tank_id,
-            "claim_token": self.claim_token,
-            "ownership_generation": self.ownership_generation,
-            "active": bool(active)
-        }
-        try:
-            self.socket.sendto(json.dumps(payload).encode("utf-8"), self.server_addr)
-        except OSError:
-            self.mark_client_disconnected()
+        self.send_client_command("investigation", {"active": bool(active)})
 
     def send_client_terrain(self, action, environment_index=None):
-        if self.mode != "client" or not hasattr(self, "server_addr"):
-            return
-        if not self.join_accepted:
-            return
-
         payload = {
-            "type": "terrain",
-            "protocol": NETWORK_PROTOCOL_VERSION,
-            "tank_id": self.tank_id,
-            "claim_token": self.claim_token,
-            "ownership_generation": self.ownership_generation,
             "action": str(action)
         }
         if environment_index is not None:
             payload["environment_index"] = int(environment_index)
-        try:
-            self.socket.sendto(json.dumps(payload).encode("utf-8"), self.server_addr)
-        except OSError:
-            self.mark_client_disconnected()
+        self.send_client_command("terrain", payload)
 
     def send_client_input(self, task_time):
         if not self.join_accepted:
@@ -1477,6 +1589,9 @@ class UdpTankInputBridge:
         self.claim_token = ""
         self.ownership_generation = 0
         self.client_sequence = 0
+        self.client_command_sequence = 0
+        self.pending_client_commands = {}
+        self.pending_client_command_order = []
         self.app.network_join_accepted = False
         self.app.network_join_rejected_reason = ""
         self.app.network_player_id = ""
