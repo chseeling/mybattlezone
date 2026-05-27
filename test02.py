@@ -4608,7 +4608,12 @@ class MyApp(ShowBase):
                 self.update_barrel_aim_marker()
 
         self.set_auxiliary_views_visible(not server_authority and ((not waiting and not client_controller) or client_snapshot) and not client_low_render)
-        self.set_drone_view_visible(not server_authority and not waiting and not client_controller and not client_low_render)
+        self.set_drone_view_visible(
+            not server_authority and
+            not waiting and
+            ((not client_controller) or client_snapshot) and
+            not client_low_render
+        )
         self.set_recon_drone_world_visible(not server_authority and not client_low_render)
         self.set_environment_preview_visible(waiting and not server_authority)
         self.set_client_lobby_visible(waiting and client_controller)
