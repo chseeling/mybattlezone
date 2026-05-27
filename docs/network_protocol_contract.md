@@ -248,6 +248,7 @@ Top-level fields:
   "connected_tanks": ["0"],
   "claimable_tanks": ["0", "1", "2", "3"],
   "claims": {},
+  "lobby": {},
   "server_status": {},
   "tanks": {},
   "shots": {}
@@ -278,6 +279,49 @@ Per-shot state:
   "hpr": [0.0, 0.0, 0.0],
   "hidden": true,
   "shooting": false
+}
+```
+
+Lobby state:
+
+```json
+{
+  "state": "WAITING",
+  "phase": "lobby",
+  "start_policy": "tank0_required",
+  "can_start": true,
+  "required_tanks": ["0"],
+  "team_model": "teams_of_one",
+  "late_join": true,
+  "players": [
+    {
+      "player_id": "player1",
+      "tank_id": "0",
+      "controller": "HUMAN",
+      "team_id": "T0",
+      "role": "driver",
+      "ready": true
+    }
+  ],
+  "tanks": [
+    {
+      "tank_id": "0",
+      "team_id": "T0",
+      "claimable": true,
+      "claimed": true,
+      "player_id": "player1",
+      "controller": "HUMAN",
+      "status": "CLAIMED",
+      "lives": 3
+    }
+  ],
+  "terrain": {
+    "environment_index": 0,
+    "environment_name": "SIMPLE RANGE",
+    "authority_player_id": "player1",
+    "authority_tank_id": "0",
+    "locked": false
+  }
 }
 ```
 
@@ -313,8 +357,8 @@ Missing:
 
 ## Multiplayer Readiness Gaps
 
-1. Explicit lobby protocol.
-   - Needed for ready state, player list, observed tanks, claim/reclaim UX, terrain authority transfer, and future team selection.
+1. Ready/claim commands.
+   - The snapshot now exposes lobby players and tanks, but explicit ready and claim-switch commands still need implementation.
 
 2. Event stream normalization.
    - Needed so hits, deaths, ground bursts, investigation events, drone events, and future team events all follow one serial/retention model.
@@ -392,13 +436,13 @@ Benefit: lobby/session commands are dependable without rewriting the high-rate i
 
 ## Recommended Next Slice
 
-Define the explicit lobby protocol on top of the reliable command envelope:
+Add ready/claim commands on top of the reliable command envelope:
 
-- player list and join order,
-- claimable/claimed/observed tank rows,
-- ready/start state,
-- terrain authority transfer,
-- return/reclaim flow,
-- first-pass team-of-one fields.
+- `ready`
+- `unready`
+- `release_claim`
+- `claim_tank`
+- server-side validation and `command_ack` results,
+- client lobby UI for available tanks.
 
-Benefit: this turns the current lobby UI and claim behavior into a stable multiplayer contract instead of a set of special cases.
+Benefit: this makes tank switching and future multi-human lobbies explicit rather than relying on process restart or disconnect behavior.
