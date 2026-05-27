@@ -107,7 +107,7 @@ Current fields:
 
 Purpose: release the current claim.
 
-Reliability target: best-effort now; should become reliable or timeout-backed.
+Reliability target: best-effort legacy packet. New clients should prefer reliable `release_claim` through the `command` envelope.
 
 Fields:
 
@@ -120,6 +120,19 @@ Fields:
   "ownership_generation": 1
 }
 ```
+
+### `ready` / `unready` / `release_claim` / `claim_tank`
+
+Purpose: express lobby participation and claim lifecycle through the reliable session command envelope.
+
+Reliability target: reliable.
+
+Current rules:
+
+- `ready` and `unready` apply to the player's current claim.
+- New claims default to ready for the first release, keeping late participation simple.
+- `release_claim` returns the tank to the arena pool.
+- `claim_tank` validates the requested target tank. Switching to another target is a protocol affordance but is not client-enabled yet.
 
 ### `start`
 
@@ -293,6 +306,7 @@ Lobby state:
   "required_tanks": ["0"],
   "team_model": "teams_of_one",
   "late_join": true,
+  "ready_count": 1,
   "players": [
     {
       "player_id": "player1",
@@ -357,8 +371,8 @@ Missing:
 
 ## Multiplayer Readiness Gaps
 
-1. Ready/claim commands.
-   - The snapshot now exposes lobby players and tanks, but explicit ready and claim-switch commands still need implementation.
+1. Dynamic tank rebinding.
+   - The client lobby can show available tanks and issue ready/unready/release actions, but true cross-tank switching still needs the client to rebind camera/control/HUD away from startup `NETWORK_TANK_ID`.
 
 2. Event stream normalization.
    - Needed so hits, deaths, ground bursts, investigation events, drone events, and future team events all follow one serial/retention model.
@@ -367,7 +381,8 @@ Missing:
    - Needed to define whether a returning player can reclaim the same tank/player id after a short disconnect.
 
 4. Multi-human claim/switch flow.
-   - Needed for "return tank, then join another team's tank" behavior.
+   - `claim_tank` is currently guarded because the client still binds camera/control/HUD to startup `NETWORK_TANK_ID`.
+   - Needed for "return tank, then join another team's tank" behavior without restarting the client process.
 
 5. Team affordance.
    - First release can keep teams of one, but snapshots and commands should not block later team ids and team comms.
@@ -431,18 +446,28 @@ Currently routed through this envelope:
 - `restart`
 - `investigation`
 - `enemy_fire`
+- `ready`
+- `unready`
+- `release_claim`
+- `claim_tank`
+
+Ready/claim command rules:
+
+- `ready`: marks the current claim ready. New accepted claims default to ready so the current quick-start flow still works.
+- `unready`: marks the current claim unready while the arena is still in lobby.
+- `release_claim`: reliably releases the current claim.
+- `claim_tank`: validates a requested target tank. Current-tank claims succeed as idempotent confirmations; switching to a different tank is rejected until the client can safely rebind all local tank-id assumptions.
+- `can_start`: true only when required tanks are connected and ready.
 
 Benefit: lobby/session commands are dependable without rewriting the high-rate input/snapshot path.
 
 ## Recommended Next Slice
 
-Add ready/claim commands on top of the reliable command envelope:
+Add dynamic tank switching on top of the lobby command contract:
 
-- `ready`
-- `unready`
-- `release_claim`
-- `claim_tank`
-- server-side validation and `command_ack` results,
-- client lobby UI for available tanks.
+- dynamic client tank rebinding for `claim_tank`,
+- available-tank selection that can switch away from startup `NETWORK_TANK_ID`,
+- reconnect/reclaim policy for short disconnects,
+- regression tests for ready/unready/release/rejoin.
 
 Benefit: this makes tank switching and future multi-human lobbies explicit rather than relying on process restart or disconnect behavior.

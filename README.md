@@ -61,6 +61,7 @@ Use `BATTLEZONE_NET_HOST="0.0.0.0"` on the server when accepting LAN clients, an
 - D: deploy or recall recon drone
 - I: investigate a recent hit on your tank before the timer expires
 - R: restart after game over
+- Network lobby: Y marks ready, U marks unready, L releases the current claim, J rejoins after release
 
 The lower-left HUD radar shows enemy tank positions relative to your current heading. Enemy returns brighten when scanned, then fade like phosphor.
 A stitched HUD panorama shows the forward side views, with a separate rear view below.
