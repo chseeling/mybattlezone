@@ -39,6 +39,16 @@ $env:BATTLEZONE_SERVER_UI="tui"
 python test02.py
 ```
 
+Authoritative server with JSON status logs for hosted/headless-style deployment:
+
+```powershell
+cd C:\Users\cseel\myProjects\mybattlezone
+$env:BATTLEZONE_NET_MODE="server"
+$env:BATTLEZONE_SERVER_UI="logs"
+$env:BATTLEZONE_SERVER_LOG_INTERVAL="5"
+python test02.py
+```
+
 Tank 0 human client on the same machine:
 
 ```powershell

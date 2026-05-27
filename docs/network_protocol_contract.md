@@ -460,6 +460,19 @@ Ready/claim command rules:
 
 Benefit: lobby/session commands are dependable without rewriting the high-rate input/snapshot path.
 
+## Server Operator Surfaces
+
+The server dashboard state is shared by multiple operator surfaces:
+
+- `BATTLEZONE_SERVER_UI=tui`: local/Pi SSH operator dashboard using curses.
+- `BATTLEZONE_SERVER_UI=panda`: in-window server preview overlay.
+- `BATTLEZONE_SERVER_UI=logs`: JSON event and periodic status logs for hosted/headless-style deployment.
+- `BATTLEZONE_SERVER_UI=none`: suppresses operator console output.
+
+`logs` mode emits immediate event records and periodic status records using `BATTLEZONE_SERVER_LOG_INTERVAL` seconds.
+
+Benefit: the same arena status contract can support local terminal operation and managed server logs without coupling deployment to curses.
+
 ## Recommended Next Slice
 
 Harden dynamic tank switching on top of the lobby command contract:

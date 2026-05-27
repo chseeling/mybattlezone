@@ -158,6 +158,7 @@ NETWORK_SERVER_LOW_RENDER = os.environ.get("BATTLEZONE_NET_SERVER_LOW_RENDER", "
 NETWORK_SERVER_LOW_RENDER_SIZE = (720, 405)
 SERVER_UI_MODE = configured_server_ui_mode()
 SERVER_TUI_WINDOW_MODE = os.environ.get("BATTLEZONE_SERVER_TUI_WINDOW", "minimized").lower()
+SERVER_LOG_INTERVAL = float(os.environ.get("BATTLEZONE_SERVER_LOG_INTERVAL", "5.0"))
 AUDIO_FOCUS_MUTE_DEFAULT = "0" if (
     NETWORK_MODE == "client" and
     NETWORK_TANK_ID == "0" and
@@ -2417,6 +2418,7 @@ class MyApp(ShowBase):
         self.server_started_at = time.monotonic()
         self.server_event_log = []
         self.server_tui_dashboard = None
+        self.server_log_last_status_time = -999.0
         self.terrain_authority_player_id = ""
         self.terrain_authority_tank_id = ""
 
@@ -2633,6 +2635,8 @@ class MyApp(ShowBase):
             self.taskMgr.add(self.updateNetworkTask, "UpdateNetworkTask")
         if self.server_tui_dashboard is not None and self.server_tui_dashboard.enabled:
             self.taskMgr.add(self.updateServerTuiTask, "UpdateServerTuiTask")
+        if self.server_log_enabled():
+            self.taskMgr.add(self.updateServerLogTask, "UpdateServerLogTask")
 
         # base.messenger.toggleVerbose()
 
@@ -2810,22 +2814,61 @@ class MyApp(ShowBase):
     def server_panda_overlay_enabled(self):
         return self.is_network_server_authority() and SERVER_UI_MODE == "panda"
 
+    def server_log_enabled(self):
+        return self.is_network_server_authority() and SERVER_UI_MODE in {"log", "logs", "json", "headless"}
+
     def operator_console_enabled(self):
-        return not (self.is_network_server_authority() and SERVER_UI_MODE == "tui")
+        return not (self.is_network_server_authority() and SERVER_UI_MODE in {"tui", "none", "off"})
 
     def setup_server_operator_ui(self):
         if not self.is_network_server_authority():
             return
-        if SERVER_UI_MODE != "tui":
+        if SERVER_UI_MODE == "tui":
+            self.server_tui_dashboard = ServerTuiDashboard(self)
+            if self.server_tui_dashboard.enabled:
+                atexit.register(self.server_tui_dashboard.close)
+                self.record_server_event("server TUI started")
             return
-        self.server_tui_dashboard = ServerTuiDashboard(self)
-        if self.server_tui_dashboard.enabled:
-            atexit.register(self.server_tui_dashboard.close)
-            self.record_server_event("server TUI started")
+        if self.server_log_enabled():
+            self.record_server_event("server log status started")
 
     def updateServerTuiTask(self, task):
         if self.server_tui_dashboard is not None:
             self.server_tui_dashboard.update(getattr(task, "time", ClockObject.getGlobalClock().getFrameTime()))
+        return Task.cont
+
+    def server_log_payload(self, kind, payload):
+        data = {
+            "kind": kind,
+            "time": time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        }
+        data.update(payload)
+        return data
+
+    def print_server_log_payload(self, kind, payload):
+        try:
+            print(json.dumps(self.server_log_payload(kind, payload), sort_keys=True), flush=True)
+        except (TypeError, ValueError):
+            print(json.dumps(self.server_log_payload(kind, {"message": str(payload)}), sort_keys=True), flush=True)
+
+    def emit_server_status_log(self):
+        state = self.server_dashboard_state()
+        self.print_server_log_payload("status", {
+            "arena": state.get("arena", {}),
+            "network": state.get("network", {}),
+            "autonomy": state.get("autonomy", {}),
+            "lobby": state.get("lobby", {}),
+            "claims": state.get("claims", []),
+            "tanks": state.get("tanks", [])
+        })
+
+    def updateServerLogTask(self, task):
+        if not self.server_log_enabled():
+            return Task.cont
+        task_time = getattr(task, "time", ClockObject.getGlobalClock().getFrameTime())
+        if task_time - self.server_log_last_status_time >= SERVER_LOG_INTERVAL:
+            self.server_log_last_status_time = task_time
+            self.emit_server_status_log()
         return Task.cont
 
     def network_client_mode_label(self):
@@ -2997,8 +3040,11 @@ class MyApp(ShowBase):
 
     def record_server_event(self, message):
         timestamp = time.strftime("%H:%M:%S")
-        self.server_event_log.append("{} {}".format(timestamp, message))
+        event = "{} {}".format(timestamp, message)
+        self.server_event_log.append(event)
         self.server_event_log = self.server_event_log[-40:]
+        if self.server_log_enabled():
+            self.print_server_log_payload("event", {"message": event})
 
     def record_tank_fire_event(self, tank_id, source=None):
         if not self.is_network_server_authority():
