@@ -1039,6 +1039,60 @@ class UdpTankInputBridge:
         self.app.set_remote_control_tank(tank_id)
         return True
 
+    def build_claim_identity_result(self, tank_id, claim="claimed"):
+        return {
+            "claim": claim,
+            "tank_id": tank_id,
+            "player_id": self.client_player_ids.get(tank_id, ""),
+            "claim_token": self.client_claim_tokens.get(tank_id, ""),
+            "ownership_generation": self.client_claim_generations.get(tank_id, 0)
+        }
+
+    def switch_host_client_claim(self, current_tank_id, target_tank_id, addr):
+        if current_tank_id == target_tank_id:
+            return True, "", self.build_claim_identity_result(current_tank_id, "already-current")
+        if self.client_addrs.get(current_tank_id) != addr:
+            return False, "current claim mismatch", {}
+        if not self.tank_is_claimable(target_tank_id):
+            return False, "target tank not claimable", {}
+        if self.client_addrs.get(target_tank_id) is not None:
+            return False, "target tank already claimed", {"target_tank_id": target_tank_id}
+
+        player_id = self.client_player_ids.get(current_tank_id, "")
+        controller = self.client_controller_types.get(current_tank_id, "CLIENT")
+        ready = self.client_ready_states.get(current_tank_id, True)
+        last_seen = self.client_last_seen.get(current_tank_id, ClockObject.getGlobalClock().getFrameTime())
+
+        self.client_addrs.pop(current_tank_id, None)
+        self.client_last_seen.pop(current_tank_id, None)
+        self.client_join_status.pop(current_tank_id, None)
+        self.client_controller_types.pop(current_tank_id, None)
+        self.client_player_ids.pop(current_tank_id, None)
+        self.client_ready_states.pop(current_tank_id, None)
+        self.client_claim_tokens.pop(current_tank_id, None)
+        self.client_claim_generations.pop(current_tank_id, None)
+        self.client_last_input_sequences.pop(current_tank_id, None)
+        self.app.submit_remote_tank_input(current_tank_id, throttle=0.0, turn=0.0, fire=False, barrel_tilt=0.0)
+        self.app.clear_remote_control_tank(current_tank_id)
+
+        self.client_addrs[target_tank_id] = addr
+        self.client_last_seen[target_tank_id] = last_seen
+        self.client_join_status[target_tank_id] = "accepted"
+        self.client_controller_types[target_tank_id] = controller
+        self.client_player_ids[target_tank_id] = player_id or self.next_host_player_id()
+        self.client_ready_states[target_tank_id] = ready
+        if self.client_player_ids[target_tank_id] not in self.client_join_order:
+            self.client_join_order.append(self.client_player_ids[target_tank_id])
+        generation = self.next_host_claim_generation(target_tank_id)
+        self.client_claim_generations[target_tank_id] = generation
+        self.client_claim_tokens[target_tank_id] = self.build_host_claim_token(target_tank_id, generation)
+        self.client_last_input_sequences[target_tank_id] = -1
+        if self.app.terrain_authority_tank_id == current_tank_id and self.app.terrain_authority_player_id == self.client_player_ids[target_tank_id]:
+            self.app.terrain_authority_tank_id = target_tank_id
+        self.app.set_remote_control_tank(target_tank_id)
+        self.app.record_server_event("claim switch tank {} to {}".format(current_tank_id, target_tank_id))
+        return True, "", self.build_claim_identity_result(target_tank_id, "switched")
+
     def host_claim_identity_matches(self, tank_id, addr, message, require_token=True):
         if self.client_addrs.get(tank_id) != addr:
             return False
@@ -1204,12 +1258,12 @@ class UdpTankInputBridge:
             self.send_host_command_ack_payload(addr, ack)
             return
 
-        accepted, reason, result = self.dispatch_host_command(tank_id, message)
+        accepted, reason, result = self.dispatch_host_command(tank_id, message, addr)
         ack = self.command_ack_payload(tank_id, command_id, accepted, reason, result)
         self.remember_host_command_ack(command_id, addr, ack)
         self.send_host_command_ack_payload(addr, ack)
 
-    def dispatch_host_command(self, tank_id, message):
+    def dispatch_host_command(self, tank_id, message, addr=None):
         command = str(message.get("command", ""))
         payload = message.get("payload", {})
         if not isinstance(payload, dict):
@@ -1246,16 +1300,7 @@ class UdpTankInputBridge:
             target_tank_id = str(payload.get("target_tank_id", tank_id))
             if target_tank_id not in network_tank_ids():
                 return False, "invalid target tank", {}
-            if not self.tank_is_claimable(target_tank_id):
-                return False, "target tank not claimable", {}
-            if target_tank_id == tank_id:
-                return True, "", {"tank_id": tank_id, "claim": "already-current"}
-            if self.client_addrs.get(target_tank_id) is not None:
-                return False, "target tank already claimed", {"target_tank_id": target_tank_id}
-            return False, "dynamic client tank switching is not enabled yet", {
-                "tank_id": tank_id,
-                "target_tank_id": target_tank_id
-            }
+            return self.switch_host_client_claim(tank_id, target_tank_id, addr)
 
         if command == "enemy_fire":
             if tank_id != "0":
@@ -1522,6 +1567,7 @@ class UdpTankInputBridge:
         self.app.network_join_accepted = self.join_accepted
         self.app.network_join_rejected_reason = self.join_rejected_reason
         self.app.network_manual_claim_released = False
+        self.app.network_claimed_tank_id = self.tank_id
         self.app.network_connected_tanks = message.get("connected_tanks", [])
         self.app.network_claimable_tanks = message.get("claimable_tanks", self.app.network_claimable_tanks)
         self.app.network_player_id = self.player_id
@@ -1529,7 +1575,61 @@ class UdpTankInputBridge:
         self.app.network_ownership_generation = self.ownership_generation
         self.last_packet_time = ClockObject.getGlobalClock().getFrameTime()
         if self.app.is_network_client_controller():
-            self.app.update_network_client_presentation()
+            if self.join_accepted and hasattr(self.app, "apply_network_claim_identity"):
+                self.app.apply_network_claim_identity(
+                    self.tank_id,
+                    self.player_id,
+                    self.claim_token,
+                    self.ownership_generation
+                )
+            else:
+                self.app.update_network_client_presentation()
+
+    def apply_client_claim_identity(self, result):
+        tank_id = str(result.get("tank_id", self.tank_id))
+        if tank_id not in network_tank_ids():
+            return
+        self.tank_id = tank_id
+        self.join_accepted = True
+        self.join_rejected_reason = ""
+        self.manual_claim_released = False
+        self.player_id = str(result.get("player_id", self.player_id))
+        self.claim_token = str(result.get("claim_token", self.claim_token))
+        try:
+            self.ownership_generation = int(result.get("ownership_generation", self.ownership_generation))
+        except (TypeError, ValueError):
+            self.ownership_generation = 0
+        self.client_sequence = 0
+        self.client_command_sequence = 0
+        self.pending_client_commands = {}
+        self.pending_client_command_order = []
+        if hasattr(self.app, "apply_network_claim_identity"):
+            self.app.apply_network_claim_identity(
+                tank_id,
+                self.player_id,
+                self.claim_token,
+                self.ownership_generation
+            )
+
+    def prepare_client_claim_target(self, tank_id):
+        tank_id = str(tank_id)
+        if tank_id not in network_tank_ids():
+            return False
+        self.tank_id = tank_id
+        self.manual_claim_released = False
+        self.join_accepted = False
+        self.join_rejected_reason = ""
+        self.player_id = ""
+        self.claim_token = ""
+        self.ownership_generation = 0
+        self.client_sequence = 0
+        self.client_command_sequence = 0
+        self.pending_client_commands = {}
+        self.pending_client_command_order = []
+        self.last_join_send_time = -999
+        if hasattr(self.app, "apply_network_claim_identity"):
+            self.app.apply_network_claim_identity(tank_id, "", "", 0, accepted=False)
+        return True
 
     def handle_client_command_ack(self, message):
         command_id = str(message.get("command_id", ""))
@@ -1549,6 +1649,10 @@ class UdpTankInputBridge:
             )
         if bool(message.get("accepted", False)) and command == "release_claim":
             self.mark_client_disconnected(manual_release=True)
+            return
+        if bool(message.get("accepted", False)) and command == "claim_tank":
+            self.apply_client_claim_identity(message.get("result", {}))
+            self.last_packet_time = ClockObject.getGlobalClock().getFrameTime()
             return
         self.last_packet_time = ClockObject.getGlobalClock().getFrameTime()
 
@@ -2635,6 +2739,7 @@ class MyApp(ShowBase):
         self.network_claim_metadata = {}
         self.network_lobby_state = {}
         self.network_server_status = {}
+        self.network_claimed_tank_id = NETWORK_TANK_ID
         self.network_player_id = ""
         self.network_claim_token = ""
         self.network_ownership_generation = 0
@@ -2746,6 +2851,33 @@ class MyApp(ShowBase):
     def network_client_controller_label(self):
         return "AUTO" if self.network_client_uses_autonomous_controller() else "HUMAN"
 
+    def network_current_tank_id(self):
+        if self.network_bridge is not None and self.is_network_client_controller():
+            return str(getattr(self.network_bridge, "tank_id", self.network_claimed_tank_id))
+        return str(getattr(self, "network_claimed_tank_id", NETWORK_TANK_ID))
+
+    def apply_network_claim_identity(self, tank_id, player_id="", claim_token="", ownership_generation=0, accepted=True):
+        tank_id = str(tank_id)
+        if tank_id not in network_tank_ids():
+            return
+        previous_tank_id = getattr(self, "network_claimed_tank_id", NETWORK_TANK_ID)
+        self.network_claimed_tank_id = tank_id
+        self.network_join_accepted = bool(accepted)
+        self.network_manual_claim_released = False
+        self.network_join_rejected_reason = ""
+        self.network_player_id = str(player_id or "")
+        self.network_claim_token = str(claim_token or "")
+        try:
+            self.network_ownership_generation = int(ownership_generation or 0)
+        except (TypeError, ValueError):
+            self.network_ownership_generation = 0
+        if self.is_network_client_controller():
+            if accepted and not self.network_client_uses_autonomous_controller():
+                self.set_human_control_tank(tank_id)
+            if accepted and previous_tank_id != tank_id:
+                self.snap_network_snapshot_render()
+            self.update_network_client_presentation()
+
     def note_network_command_ack(self, command, accepted, reason=""):
         command_label = str(command or "").replace("_", " ").upper()
         if accepted:
@@ -2774,6 +2906,30 @@ class MyApp(ShowBase):
             return
         self.network_bridge.send_client_release_claim()
 
+    def request_network_lobby_claim_tank(self, tank_id):
+        if not self.is_network_client_controller():
+            return
+        if not self.waiting_to_start:
+            return
+        tank_id = str(tank_id)
+        if tank_id not in network_tank_ids():
+            return
+        if self.network_bridge is None:
+            return
+        current_tank_id = self.network_current_tank_id()
+        if self.network_join_accepted:
+            if tank_id == current_tank_id:
+                self.network_last_command_status = "CLAIM CURRENT {}".format(tank_id)
+                self.network_last_command_ok = True
+                return
+            self.network_bridge.send_client_claim_tank(tank_id)
+            return
+        if self.network_bridge.prepare_client_claim_target(tank_id):
+            self.network_manual_claim_released = False
+            self.network_last_command_status = "JOIN {}".format(tank_id)
+            self.network_last_command_ok = True
+            self.update_network_client_presentation()
+
     def rejoin_network_lobby_claim(self):
         if not self.is_network_client_controller():
             return
@@ -2785,14 +2941,14 @@ class MyApp(ShowBase):
         self.network_bridge.last_join_send_time = -999
         self.network_manual_claim_released = False
         self.network_join_rejected_reason = ""
-        self.network_last_command_status = "REJOIN {}".format(NETWORK_TANK_ID)
+        self.network_last_command_status = "REJOIN {}".format(self.network_current_tank_id())
         self.network_last_command_ok = True
         self.update_network_client_presentation()
 
     def network_autonomous_client_command(self, dt, task_time):
         if not self.network_snapshot_received:
             return TankCommand()
-        tank_id = NETWORK_TANK_ID
+        tank_id = self.network_current_tank_id()
         controller = self.ai_tank_controllers.get(tank_id)
         avatar = self.tank_avatars.get(tank_id)
         if controller is None or avatar is None:
@@ -3148,8 +3304,12 @@ class MyApp(ShowBase):
     def set_human_control_tank(self, tank_id):
         if tank_id != "0" and tank_id not in tanks_list:
             return
-        if self.is_network_client_controller() and tank_id != NETWORK_TANK_ID:
-            return
+        if self.is_network_client_controller():
+            if self.waiting_to_start and (tank_id != self.network_current_tank_id() or not self.network_join_accepted):
+                self.request_network_lobby_claim_tank(tank_id)
+                return
+            if tank_id != self.network_current_tank_id():
+                return
 
         self.human_control_tank_id = tank_id
         self.tank_controllers["0"] = self.human_tank_controller if tank_id == "0" else TankController()
@@ -3767,7 +3927,7 @@ class MyApp(ShowBase):
 
     def current_view_tank_id(self):
         if self.is_network_client_controller():
-            return NETWORK_TANK_ID
+            return self.network_current_tank_id()
         if self.is_network_server_authority():
             return None
         return "0"
@@ -3799,7 +3959,7 @@ class MyApp(ShowBase):
         }
 
     def apply_network_player_investigation_event(self, event):
-        if NETWORK_TANK_ID != "0" or not event:
+        if self.network_current_tank_id() != "0" or not event:
             return
 
         remaining = float(event.get("remaining", 0.0))
@@ -3916,7 +4076,7 @@ class MyApp(ShowBase):
 
         player_damage_serial = int(snapshot.get("player_damage_event_serial", 0))
         if (
-                NETWORK_TANK_ID == "0" and
+                self.network_current_tank_id() == "0" and
                 not first_snapshot and
                 player_damage_serial > self.network_player_damage_event_serial):
             self.apply_network_player_investigation_event(snapshot.get("player_investigation_event"))
@@ -3958,7 +4118,7 @@ class MyApp(ShowBase):
         if not hasattr(self, "gameOverTextObject"):
             return
         if self.game_over:
-            if NETWORK_TANK_ID == "0":
+            if self.network_current_tank_id() == "0":
                 self.gameOverTextObject.text = "GAME OVER\nR TO RESTART"
             else:
                 self.gameOverTextObject.text = "GAME OVER"
@@ -4162,12 +4322,13 @@ class MyApp(ShowBase):
 
     def snap_network_snapshot_render(self):
         tank_states = self.network_snapshot_targets.get("tanks", {})
-        view_state = self.network_view_state_for_tank(NETWORK_TANK_ID, tank_states)
+        view_tank_id = self.network_current_tank_id()
+        view_state = self.network_view_state_for_tank(view_tank_id, tank_states)
         if view_state:
             self.camera.setPos(render, self.snapshot_state_point(view_state, "pos"))
             self.camera.setHpr(render, *self.snapshot_state_hpr(view_state))
             self.player_barrel_tilt = float(view_state.get("barrel_tilt", 0.0))
-            if NETWORK_TANK_ID == "0":
+            if view_tank_id == "0":
                 self.apply_player_hit_camera_shake()
 
         for tank_id in self.tank_ids_for_state():
@@ -4186,11 +4347,12 @@ class MyApp(ShowBase):
         self.update_network_snapshot_visibility(targets)
 
         tank_states = targets.get("tanks", {})
-        view_state = self.network_view_state_for_tank(NETWORK_TANK_ID, tank_states)
+        view_tank_id = self.network_current_tank_id()
+        view_state = self.network_view_state_for_tank(view_tank_id, tank_states)
         if view_state:
             self.set_node_to_snapshot(self.camera, view_state)
             self.player_barrel_tilt = float(view_state.get("barrel_tilt", 0.0))
-            if NETWORK_TANK_ID == "0":
+            if view_tank_id == "0":
                 self.apply_player_hit_camera_shake()
 
         for tank_id in self.tank_ids_for_state():
@@ -4602,7 +4764,7 @@ class MyApp(ShowBase):
 
     def toggle_investigation(self):
         if self.investigation_mode:
-            if self.is_network_client_controller() and NETWORK_TANK_ID == "0" and self.network_bridge is not None:
+            if self.is_network_client_controller() and self.network_current_tank_id() == "0" and self.network_bridge is not None:
                 self.network_bridge.send_client_investigation(False)
             self.exit_investigation()
             return
@@ -4610,7 +4772,7 @@ class MyApp(ShowBase):
         now = ClockObject.getGlobalClock().getFrameTime()
         if self.last_player_hit_event and (
                 self.last_player_hit_event.get("fatal", False) or now <= self.investigation_available_until):
-            if self.is_network_client_controller() and NETWORK_TANK_ID == "0" and self.network_bridge is not None:
+            if self.is_network_client_controller() and self.network_current_tank_id() == "0" and self.network_bridge is not None:
                 self.network_bridge.send_client_investigation(True)
             self.enter_investigation()
 
@@ -5025,8 +5187,9 @@ class MyApp(ShowBase):
         elif self.network_join_rejected_reason:
             link_state = "REJECTED"
 
+        current_tank_id = self.network_current_tank_id()
         own_player = next((row for row in players if row.get("player_id") == self.network_player_id), {})
-        own_team = own_player.get("team_id", "T{}".format(NETWORK_TANK_ID))
+        own_team = own_player.get("team_id", "T{}".format(current_tank_id))
         own_role = own_player.get("role", "driver").upper()
         own_ready = bool(own_player.get("ready", self.network_join_accepted and not self.network_manual_claim_released))
         claimed_tanks = len([row for row in tanks if row.get("claimed")])
@@ -5061,7 +5224,7 @@ class MyApp(ShowBase):
 
         self.clientLobbyTitleObject.text = "BATTLEZONE ARENA"
         self.clientLobbyStatusObject.text = str(lobby.get("state", "LOBBY")).upper()
-        self.clientLobbyRows["tank"].text = "TANK        {}".format(NETWORK_TANK_ID)
+        self.clientLobbyRows["tank"].text = "TANK        {}".format(current_tank_id)
         self.clientLobbyRows["link"].text = "LINK        {}".format(link_state)
         self.clientLobbyRows["server"].text = "SERVER      {}".format(server)
         self.clientLobbyRows["players"].text = "PLAYERS     {}  READY {}  CLAIMS {}".format(player_count, ready_count, claimed_tanks)
@@ -5071,7 +5234,7 @@ class MyApp(ShowBase):
         self.clientLobbyRows["terrain"].text = "TERRAIN     {}".format(terrain.get("environment_name", self.selected_environment()["name"]))
         self.clientLobbyRows["authority"].text = "AUTHORITY   {}".format(authority)
         self.clientLobbyRows["control"].text = "TERRAIN     {}".format(terrain_control)
-        self.clientLobbyRows["claim"].text = "CLAIM       CURRENT {}  OPEN {}".format(NETWORK_TANK_ID, open_label)
+        self.clientLobbyRows["claim"].text = "CLAIM       CURRENT {}  OPEN {}".format(current_tank_id, open_label)
         self.clientLobbyRows["start"].text = "START       {}".format(start_state)
         self.clientLobbyRows["command"].text = "COMMAND     {}".format(command_status[:42])
 
@@ -5402,7 +5565,7 @@ class MyApp(ShowBase):
         self.update_lives_hud()
 
     def updatePlayerFeedbackTask(self, task):
-        if not self.is_network_client_controller() or NETWORK_TANK_ID == "0":
+        if not self.is_network_client_controller() or self.network_current_tank_id() == "0":
             self.update_investigation_prompt()
 
         if self.investigation_mode:
@@ -7664,7 +7827,7 @@ class MyApp(ShowBase):
 
     def toggle_enemy_shooting(self):
         if self.is_network_client_controller():
-            if NETWORK_TANK_ID != "0":
+            if self.network_current_tank_id() != "0":
                 return
             self.set_enemy_shooting_suspended(not self.enemy_shooting_suspended)
             if self.network_bridge is not None:
@@ -7815,7 +7978,7 @@ class MyApp(ShowBase):
             status_text += "\n" + self.network_bridge.status()
         elif self.is_network_client_controller():
             connected = ",".join(getattr(self, "network_connected_tanks", [])) or "?"
-            status_text += "\nNET CLIENT {}\nSERVER TANKS {}".format(NETWORK_TANK_ID, connected)
+            status_text += "\nNET CLIENT {}\nSERVER TANKS {}".format(self.network_current_tank_id(), connected)
         if self.is_network_client_low_render():
             status_text += "\nCLIENT LOW RENDER"
         if self.is_network_client_controller():

@@ -132,7 +132,7 @@ Current rules:
 - `ready` and `unready` apply to the player's current claim.
 - New claims default to ready for the first release, keeping late participation simple.
 - `release_claim` returns the tank to the arena pool.
-- `claim_tank` validates the requested target tank. Switching to another target is a protocol affordance but is not client-enabled yet.
+- `claim_tank` atomically returns the player's current tank and moves the claim to an available target tank.
 
 ### `start`
 
@@ -371,18 +371,17 @@ Missing:
 
 ## Multiplayer Readiness Gaps
 
-1. Dynamic tank rebinding.
-   - The client lobby can show available tanks and issue ready/unready/release actions, but true cross-tank switching still needs the client to rebind camera/control/HUD away from startup `NETWORK_TANK_ID`.
+1. Reconnect behavior.
+   - Needed to define whether a returning player can reclaim the same tank/player id after a short disconnect.
 
 2. Event stream normalization.
    - Needed so hits, deaths, ground bursts, investigation events, drone events, and future team events all follow one serial/retention model.
 
-3. Reconnect behavior.
-   - Needed to define whether a returning player can reclaim the same tank/player id after a short disconnect.
+3. Claim-switch tests.
+   - Needed to harden switching from tank 0 to another tank, switching between nonzero tanks, rejection when a target is already claimed, and joining a target after release.
 
 4. Multi-human claim/switch flow.
-   - `claim_tank` is currently guarded because the client still binds camera/control/HUD to startup `NETWORK_TANK_ID`.
-   - Needed for "return tank, then join another team's tank" behavior without restarting the client process.
+   - Basic claim switching is implemented, but the lobby still needs a richer selection surface than number keys.
 
 5. Team affordance.
    - First release can keep teams of one, but snapshots and commands should not block later team ids and team comms.
@@ -456,18 +455,18 @@ Ready/claim command rules:
 - `ready`: marks the current claim ready. New accepted claims default to ready so the current quick-start flow still works.
 - `unready`: marks the current claim unready while the arena is still in lobby.
 - `release_claim`: reliably releases the current claim.
-- `claim_tank`: validates a requested target tank. Current-tank claims succeed as idempotent confirmations; switching to a different tank is rejected until the client can safely rebind all local tank-id assumptions.
+- `claim_tank`: validates a requested target tank. Current-tank claims succeed as idempotent confirmations; switching to a different tank atomically returns the old tank and transfers the claim identity to the target.
 - `can_start`: true only when required tanks are connected and ready.
 
 Benefit: lobby/session commands are dependable without rewriting the high-rate input/snapshot path.
 
 ## Recommended Next Slice
 
-Add dynamic tank switching on top of the lobby command contract:
+Harden dynamic tank switching on top of the lobby command contract:
 
-- dynamic client tank rebinding for `claim_tank`,
-- available-tank selection that can switch away from startup `NETWORK_TANK_ID`,
 - reconnect/reclaim policy for short disconnects,
-- regression tests for ready/unready/release/rejoin.
+- richer available-tank selection UI,
+- regression tests for ready/unready/release/rejoin/switch,
+- multi-client test with two human claims.
 
 Benefit: this makes tank switching and future multi-human lobbies explicit rather than relying on process restart or disconnect behavior.
