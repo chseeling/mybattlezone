@@ -8,7 +8,10 @@ loadPrcFile("config/conf.prc")
 import json
 import math
 import os
+import secrets
 import socket
+import time
+import atexit
 from math import pi, sin, cos
 from random import random
 
@@ -88,6 +91,22 @@ NUMET = len(tanks_list)  # number of active non-player tanks
 def network_tank_ids():
     return {"0"} | set(tanks_list)
 
+def configured_claimable_tanks():
+    valid_tanks = network_tank_ids()
+    default_tanks = ",".join(sorted(valid_tanks, key=lambda tank_id: int(tank_id)))
+    requested = os.environ.get("BATTLEZONE_CLAIMABLE_TANKS", default_tanks)
+    claimable = {
+        tank_id.strip()
+        for tank_id in requested.split(",")
+        if tank_id.strip() in valid_tanks
+    }
+    if claimable:
+        return claimable
+    print("Ignoring BATTLEZONE_CLAIMABLE_TANKS='{}'; using tanks {}".format(requested, default_tanks))
+    return set(valid_tanks)
+
+CLAIMABLE_TANK_IDS = configured_claimable_tanks()
+
 DEBUG = os.environ.get("BATTLEZONE_DEBUG", "").lower() in {"1", "true", "yes", "on"}
 NETWORK_MODE = os.environ.get("BATTLEZONE_NET_MODE", "").lower()
 if NETWORK_MODE == "server":
@@ -113,6 +132,7 @@ NETWORK_CLIENT_LOW_RENDER = os.environ.get("BATTLEZONE_NET_CLIENT_LOW_RENDER", N
 NETWORK_CLIENT_LOW_RENDER_SIZE = (960, 540)
 NETWORK_SERVER_LOW_RENDER = os.environ.get("BATTLEZONE_NET_SERVER_LOW_RENDER", "1").lower() in {"1", "true", "yes", "on"}
 NETWORK_SERVER_LOW_RENDER_SIZE = (720, 405)
+SERVER_UI_MODE = os.environ.get("BATTLEZONE_SERVER_UI", "panda").lower()
 AUDIO_FOCUS_MUTE_DEFAULT = "0" if (
     NETWORK_MODE == "client" and
     NETWORK_TANK_ID == "0" and
@@ -793,11 +813,26 @@ class UdpTankInputBridge:
         self.client_last_seen = {}
         self.client_join_status = {}
         self.client_controller_types = {}
+        self.client_player_ids = {}
+        self.client_claim_tokens = {}
+        self.client_claim_generations = {}
+        self.client_last_input_sequences = {}
+        self.tank_claim_generation_counters = {}
+        self.next_player_number = 1
         self.join_accepted = False
         self.join_rejected_reason = ""
+        self.player_id = ""
+        self.claim_token = ""
+        self.ownership_generation = 0
+        self.client_sequence = 0
         self.last_join_send_time = -999
         self.last_send_time = 0
         self.last_snapshot_time = 0
+        self.snapshot_frame_count = 0
+        self.snapshot_packet_count = 0
+        self.rejected_join_count = 0
+        self.rejected_input_count = 0
+        self.rejected_sequence_count = 0
         self.last_fire_down = False
         self.last_packet_time = None
         self.last_packet_count = 0
@@ -830,6 +865,12 @@ class UdpTankInputBridge:
     def connected_tank_ids(self):
         return sorted(self.client_addrs.keys(), key=lambda tank_id: int(tank_id))
 
+    def claimable_tank_ids(self):
+        return sorted(CLAIMABLE_TANK_IDS, key=lambda tank_id: int(tank_id))
+
+    def tank_is_claimable(self, tank_id):
+        return tank_id in CLAIMABLE_TANK_IDS
+
     def update(self, task_time):
         if self.mode == "host":
             self.receive_host_packets(task_time)
@@ -837,6 +878,7 @@ class UdpTankInputBridge:
             self.send_host_snapshot(task_time)
         elif self.mode == "client":
             self.receive_client_packets(task_time)
+            self.expire_client_claim(task_time)
             self.send_client_join(task_time)
             self.send_client_input(task_time)
 
@@ -875,7 +917,7 @@ class UdpTankInputBridge:
             tank_id = str(message.get("tank_id", self.tank_id))
             if tank_id not in network_tank_ids():
                 continue
-            if not self.accept_host_client_claim(tank_id, addr, task_time, message.get("controller")):
+            if not self.accept_host_tank_intent(tank_id, addr, message, task_time):
                 continue
 
             self.last_packet_time = task_time
@@ -885,19 +927,47 @@ class UdpTankInputBridge:
     def handle_host_join(self, message, addr, task_time):
         tank_id = str(message.get("tank_id", self.tank_id))
         if tank_id not in network_tank_ids():
+            self.rejected_join_count += 1
+            self.app.record_server_event("join rejected tank {} invalid".format(tank_id))
             self.send_host_join_ack(addr, tank_id, False, "invalid tank")
+            return
+        if not self.tank_is_claimable(tank_id):
+            self.rejected_join_count += 1
+            self.app.record_server_event("join rejected tank {} reserved".format(tank_id))
+            self.send_host_join_ack(addr, tank_id, False, "tank not claimable")
             return
 
         if not self.accept_host_client_claim(tank_id, addr, task_time, message.get("controller")):
+            self.rejected_join_count += 1
+            self.app.record_server_event("join rejected tank {} already claimed".format(tank_id))
             self.send_host_join_ack(addr, tank_id, False, "tank already claimed")
             return
 
+        self.app.record_server_event("join accepted tank {} {}".format(tank_id, self.client_controller_types.get(tank_id, "CLIENT")))
         self.send_host_join_ack(addr, tank_id, True, "")
+
+    def next_host_player_id(self):
+        player_id = "player{}".format(self.next_player_number)
+        self.next_player_number += 1
+        return player_id
+
+    def next_host_claim_generation(self, tank_id):
+        generation = self.tank_claim_generation_counters.get(tank_id, 0) + 1
+        self.tank_claim_generation_counters[tank_id] = generation
+        return generation
+
+    def build_host_claim_token(self, tank_id, generation):
+        return "{}:{}:{}".format(tank_id, generation, secrets.token_hex(8))
 
     def accept_host_client_claim(self, tank_id, addr, task_time, controller=None):
         existing_addr = self.client_addrs.get(tank_id)
-        if existing_addr is not None and existing_addr != addr:
-            return False
+        if existing_addr is not None:
+            if existing_addr != addr:
+                return False
+            self.client_last_seen[tank_id] = task_time
+            if controller:
+                self.client_controller_types[tank_id] = str(controller).upper()
+            return True
 
         self.client_addr = addr
         self.client_addrs[tank_id] = addr
@@ -905,10 +975,48 @@ class UdpTankInputBridge:
         self.client_join_status[tank_id] = "accepted"
         if controller:
             self.client_controller_types[tank_id] = str(controller).upper()
+        self.client_player_ids[tank_id] = self.next_host_player_id()
+        generation = self.next_host_claim_generation(tank_id)
+        self.client_claim_generations[tank_id] = generation
+        self.client_claim_tokens[tank_id] = self.build_host_claim_token(tank_id, generation)
+        self.client_last_input_sequences[tank_id] = -1
         self.app.set_remote_control_tank(tank_id)
         return True
 
-    def release_host_client_claim(self, tank_id, addr=None):
+    def host_claim_identity_matches(self, tank_id, addr, message, require_token=True):
+        if self.client_addrs.get(tank_id) != addr:
+            return False
+        if not require_token:
+            return True
+        token = str(message.get("claim_token", ""))
+        if token != self.client_claim_tokens.get(tank_id, ""):
+            return False
+        try:
+            generation = int(message.get("ownership_generation", -1))
+        except (TypeError, ValueError):
+            return False
+        return generation == self.client_claim_generations.get(tank_id)
+
+    def accept_host_tank_intent(self, tank_id, addr, message, task_time):
+        if not self.host_claim_identity_matches(tank_id, addr, message):
+            self.rejected_input_count += 1
+            return False
+        try:
+            client_sequence = int(message.get("client_sequence"))
+        except (TypeError, ValueError):
+            self.rejected_input_count += 1
+            return False
+        if client_sequence <= self.client_last_input_sequences.get(tank_id, -1):
+            self.rejected_sequence_count += 1
+            return False
+        self.client_last_seen[tank_id] = task_time
+        self.client_last_input_sequences[tank_id] = client_sequence
+        controller = message.get("controller")
+        if controller:
+            self.client_controller_types[tank_id] = str(controller).upper()
+        return True
+
+    def release_host_client_claim(self, tank_id, addr=None, reason="released"):
         existing_addr = self.client_addrs.get(tank_id)
         if existing_addr is None:
             return False
@@ -919,21 +1027,28 @@ class UdpTankInputBridge:
         self.client_last_seen.pop(tank_id, None)
         self.client_join_status.pop(tank_id, None)
         self.client_controller_types.pop(tank_id, None)
+        self.client_player_ids.pop(tank_id, None)
+        self.client_claim_tokens.pop(tank_id, None)
+        self.client_claim_generations.pop(tank_id, None)
+        self.client_last_input_sequences.pop(tank_id, None)
         self.app.submit_remote_tank_input(tank_id, throttle=0.0, turn=0.0, fire=False, barrel_tilt=0.0)
         self.app.clear_remote_control_tank(tank_id)
+        self.app.record_server_event("claim {} tank {}".format(reason, tank_id))
         return True
 
     def handle_host_leave(self, message, addr):
         tank_id = str(message.get("tank_id", self.tank_id))
         if tank_id not in network_tank_ids():
             return
-        self.release_host_client_claim(tank_id, addr)
+        if not self.host_claim_identity_matches(tank_id, addr, message):
+            return
+        self.release_host_client_claim(tank_id, addr, "released")
 
     def handle_host_restart(self, message, addr):
         tank_id = str(message.get("tank_id", self.tank_id))
         if tank_id != "0":
             return
-        if self.client_addrs.get(tank_id) != addr:
+        if not self.host_claim_identity_matches(tank_id, addr, message):
             return
         self.app.restart_game()
 
@@ -941,7 +1056,7 @@ class UdpTankInputBridge:
         tank_id = str(message.get("tank_id", self.tank_id))
         if tank_id not in network_tank_ids():
             return
-        if self.client_addrs.get(tank_id) != addr:
+        if not self.host_claim_identity_matches(tank_id, addr, message):
             return
         self.app.start_game()
 
@@ -949,9 +1064,34 @@ class UdpTankInputBridge:
         tank_id = str(message.get("tank_id", self.tank_id))
         if tank_id != "0":
             return
-        if self.client_addrs.get(tank_id) != addr:
+        if not self.host_claim_identity_matches(tank_id, addr, message):
             return
         self.app.set_enemy_shooting_suspended(bool(message.get("suspended", False)))
+
+    def host_claim_snapshot(self):
+        claims = {}
+        for tank_id in self.connected_tank_ids():
+            claims[tank_id] = {
+                "player_id": self.client_player_ids.get(tank_id, ""),
+                "controller": self.client_controller_types.get(tank_id, "CLIENT"),
+                "ownership_generation": self.client_claim_generations.get(tank_id, 0),
+                "last_input_sequence": self.client_last_input_sequences.get(tank_id, -1)
+            }
+        return claims
+
+    def host_status_snapshot(self):
+        return {
+            "host": self.host,
+            "port": self.port,
+            "claimable_count": len(CLAIMABLE_TANK_IDS),
+            "connected_count": len(self.client_addrs),
+            "rx_input_packets": self.last_packet_count,
+            "snapshot_frames": self.snapshot_frame_count,
+            "snapshot_packets": self.snapshot_packet_count,
+            "rejected_joins": self.rejected_join_count,
+            "rejected_inputs": self.rejected_input_count,
+            "rejected_sequences": self.rejected_sequence_count
+        }
 
     def send_host_join_ack(self, addr, tank_id, accepted, reason):
         payload = {
@@ -960,8 +1100,15 @@ class UdpTankInputBridge:
             "tank_id": tank_id,
             "accepted": bool(accepted),
             "reason": reason,
-            "connected_tanks": self.connected_tank_ids()
+            "connected_tanks": self.connected_tank_ids(),
+            "claimable_tanks": self.claimable_tank_ids()
         }
+        if accepted:
+            payload.update({
+                "player_id": self.client_player_ids.get(tank_id, ""),
+                "claim_token": self.client_claim_tokens.get(tank_id, ""),
+                "ownership_generation": self.client_claim_generations.get(tank_id, 0)
+            })
         try:
             self.socket.sendto(json.dumps(payload).encode("utf-8"), addr)
         except OSError:
@@ -977,13 +1124,15 @@ class UdpTankInputBridge:
         payload = self.app.build_network_snapshot(task_time)
         packet = json.dumps(payload).encode("utf-8")
         stale_tanks = []
+        self.snapshot_frame_count += 1
         for tank_id, addr in self.client_addrs.items():
             try:
                 self.socket.sendto(packet, addr)
+                self.snapshot_packet_count += 1
             except OSError:
                 stale_tanks.append(tank_id)
         for tank_id in stale_tanks:
-            self.release_host_client_claim(tank_id)
+            self.release_host_client_claim(tank_id, reason="stale-send")
 
     def expire_host_clients(self, task_time):
         stale_tanks = [
@@ -992,7 +1141,7 @@ class UdpTankInputBridge:
             if task_time - last_seen > NETWORK_CLIENT_TIMEOUT
         ]
         for tank_id in stale_tanks:
-            self.release_host_client_claim(tank_id)
+            self.release_host_client_claim(tank_id, reason="timeout")
 
     def receive_client_packets(self, task_time):
         while True:
@@ -1024,11 +1173,39 @@ class UdpTankInputBridge:
     def handle_client_join_ack(self, message):
         if str(message.get("tank_id", self.tank_id)) != self.tank_id:
             return
+        was_accepted = self.join_accepted
+        previous_token = self.claim_token
+        previous_generation = self.ownership_generation
         self.join_accepted = bool(message.get("accepted", False))
         self.join_rejected_reason = "" if self.join_accepted else str(message.get("reason", "join rejected"))
+        if self.join_accepted:
+            new_player_id = str(message.get("player_id", ""))
+            new_claim_token = str(message.get("claim_token", ""))
+            try:
+                new_ownership_generation = int(message.get("ownership_generation", 0))
+            except (TypeError, ValueError):
+                new_ownership_generation = 0
+            self.player_id = new_player_id
+            self.claim_token = new_claim_token
+            self.ownership_generation = new_ownership_generation
+            if (
+                    not was_accepted or
+                    previous_token != new_claim_token or
+                    previous_generation != new_ownership_generation):
+                self.client_sequence = 0
+        else:
+            self.player_id = ""
+            self.claim_token = ""
+            self.ownership_generation = 0
+            self.client_sequence = 0
         self.app.network_join_accepted = self.join_accepted
         self.app.network_join_rejected_reason = self.join_rejected_reason
         self.app.network_connected_tanks = message.get("connected_tanks", [])
+        self.app.network_claimable_tanks = message.get("claimable_tanks", self.app.network_claimable_tanks)
+        self.app.network_player_id = self.player_id
+        self.app.network_claim_token = self.claim_token
+        self.app.network_ownership_generation = self.ownership_generation
+        self.last_packet_time = ClockObject.getGlobalClock().getFrameTime()
         if self.app.is_network_client_controller():
             self.app.update_network_client_presentation()
 
@@ -1050,6 +1227,15 @@ class UdpTankInputBridge:
         except OSError:
             self.mark_client_disconnected()
 
+    def expire_client_claim(self, task_time):
+        if not self.join_accepted:
+            return
+        if self.last_packet_time is None:
+            return
+        if task_time - self.last_packet_time <= NETWORK_CLIENT_TIMEOUT:
+            return
+        self.mark_client_disconnected()
+
     def send_client_leave(self):
         if self.mode != "client" or not hasattr(self, "server_addr"):
             return
@@ -1059,7 +1245,9 @@ class UdpTankInputBridge:
         payload = {
             "type": "leave",
             "protocol": NETWORK_PROTOCOL_VERSION,
-            "tank_id": self.tank_id
+            "tank_id": self.tank_id,
+            "claim_token": self.claim_token,
+            "ownership_generation": self.ownership_generation
         }
         try:
             self.socket.sendto(json.dumps(payload).encode("utf-8"), self.server_addr)
@@ -1076,7 +1264,9 @@ class UdpTankInputBridge:
         payload = {
             "type": "restart",
             "protocol": NETWORK_PROTOCOL_VERSION,
-            "tank_id": self.tank_id
+            "tank_id": self.tank_id,
+            "claim_token": self.claim_token,
+            "ownership_generation": self.ownership_generation
         }
         try:
             self.socket.sendto(json.dumps(payload).encode("utf-8"), self.server_addr)
@@ -1092,7 +1282,9 @@ class UdpTankInputBridge:
         payload = {
             "type": "start",
             "protocol": NETWORK_PROTOCOL_VERSION,
-            "tank_id": self.tank_id
+            "tank_id": self.tank_id,
+            "claim_token": self.claim_token,
+            "ownership_generation": self.ownership_generation
         }
         try:
             self.socket.sendto(json.dumps(payload).encode("utf-8"), self.server_addr)
@@ -1109,6 +1301,8 @@ class UdpTankInputBridge:
             "type": "enemy_fire",
             "protocol": NETWORK_PROTOCOL_VERSION,
             "tank_id": self.tank_id,
+            "claim_token": self.claim_token,
+            "ownership_generation": self.ownership_generation,
             "suspended": bool(suspended)
         }
         try:
@@ -1125,10 +1319,15 @@ class UdpTankInputBridge:
         self.last_send_time = task_time
 
         command = self.capture_local_input(dt, task_time)
+        self.client_sequence += 1
         payload = {
             "type": "input",
             "tank_id": self.tank_id,
             "protocol": NETWORK_PROTOCOL_VERSION,
+            "player_id": self.player_id,
+            "claim_token": self.claim_token,
+            "ownership_generation": self.ownership_generation,
+            "client_sequence": self.client_sequence,
             "controller": self.app.network_client_controller_label()
         }
         payload.update(self.command_to_message(command))
@@ -1142,8 +1341,16 @@ class UdpTankInputBridge:
             return
         self.join_accepted = False
         self.join_rejected_reason = ""
+        self.player_id = ""
+        self.claim_token = ""
+        self.ownership_generation = 0
+        self.client_sequence = 0
         self.app.network_join_accepted = False
         self.app.network_join_rejected_reason = ""
+        self.app.network_player_id = ""
+        self.app.network_claim_token = ""
+        self.app.network_ownership_generation = 0
+        self.app.network_claim_metadata = {}
         self.app.network_snapshot_received = False
         self.app.network_snapshot_shot_visible = {}
         if hasattr(self.app, "update_network_client_audio_state"):
@@ -1463,9 +1670,222 @@ class TacticalAiTankController(TankController):
         )
 
 
+class ServerTuiDashboard:
+    def __init__(self, app):
+        self.app = app
+        self.screen = None
+        self.curses = None
+        self.enabled = False
+        self.last_draw_time = 0
+        self.colors = {}
+
+        try:
+            import curses
+            self.curses = curses
+            self.screen = curses.initscr()
+            curses.noecho()
+            curses.cbreak()
+            self.screen.keypad(True)
+            self.screen.nodelay(True)
+            if curses.has_colors():
+                curses.start_color()
+                curses.use_default_colors()
+                self.init_colors()
+            self.enabled = True
+            self.draw()
+        except Exception as exc:
+            self.enabled = False
+            self.close()
+            print("Server TUI disabled: {}".format(exc))
+
+    def init_colors(self):
+        curses = self.curses
+        curses.init_pair(1, curses.COLOR_GREEN, -1)
+        curses.init_pair(2, curses.COLOR_GREEN, -1)
+        curses.init_pair(3, curses.COLOR_YELLOW, -1)
+        curses.init_pair(4, curses.COLOR_RED, -1)
+        curses.init_pair(5, curses.COLOR_BLACK, curses.COLOR_GREEN)
+        self.colors = {
+            "normal": curses.color_pair(1),
+            "dim": curses.color_pair(2) | curses.A_DIM,
+            "warn": curses.color_pair(3),
+            "error": curses.color_pair(4),
+            "active": curses.color_pair(5),
+            "bold": curses.color_pair(1) | curses.A_BOLD,
+        }
+
+    def color(self, name):
+        return self.colors.get(name, 0)
+
+    def close(self):
+        if self.curses is None or self.screen is None:
+            return
+        try:
+            self.screen.nodelay(False)
+            self.screen.keypad(False)
+            self.curses.nocbreak()
+            self.curses.echo()
+            self.curses.endwin()
+        except Exception:
+            pass
+        self.screen = None
+
+    def update(self, task_time):
+        if not self.enabled:
+            return
+        self.handle_input()
+        if task_time - self.last_draw_time >= 0.25:
+            self.draw()
+            self.last_draw_time = task_time
+
+    def handle_input(self):
+        try:
+            key = self.screen.getch()
+        except Exception:
+            return
+        if key in (ord("q"), ord("Q")):
+            self.app.record_server_event("operator requested clean quit")
+            self.close()
+            self.app.userExit()
+
+    def addstr(self, y, x, text, attr=0):
+        try:
+            height, width = self.screen.getmaxyx()
+            if y < 0 or y >= height or x >= width:
+                return
+            clipped = str(text)[:max(0, width - x - 1)]
+            self.screen.addstr(y, x, clipped, attr)
+        except Exception:
+            pass
+
+    def draw_box(self, y, x, height, width, title):
+        if height < 3 or width < 8:
+            return
+        top = "+" + "-" * (width - 2) + "+"
+        mid = "|" + " " * (width - 2) + "|"
+        self.addstr(y, x, top, self.color("dim"))
+        for row in range(1, height - 1):
+            self.addstr(y + row, x, mid, self.color("dim"))
+        self.addstr(y + height - 1, x, top, self.color("dim"))
+        if title:
+            self.addstr(y, x + 2, " {} ".format(title.upper()), self.color("bold"))
+
+    def draw_kv_lines(self, y, x, lines, attr=None):
+        attr = self.color("normal") if attr is None else attr
+        for index, line in enumerate(lines):
+            self.addstr(y + index, x, line, attr)
+
+    def draw_table(self, y, x, headers, rows, widths):
+        header_text = " ".join([
+            str(header)[:width].ljust(width)
+            for header, width in zip(headers, widths)
+        ])
+        self.addstr(y, x, header_text, self.color("bold"))
+        self.addstr(y + 1, x, "-" * len(header_text), self.color("dim"))
+        for row_index, row in enumerate(rows):
+            parts = []
+            for value, width in zip(row, widths):
+                parts.append(str(value)[:width].ljust(width))
+            text = " ".join(parts)
+            attr = self.color("normal")
+            status_text = " ".join([str(value) for value in row])
+            if "ERR" in status_text or "BAD" in status_text:
+                attr = self.color("error")
+            elif "WARN" in status_text or "STALE" in status_text:
+                attr = self.color("warn")
+            elif "JOINED" in status_text:
+                attr = self.color("bold")
+            elif "RESERVED" in status_text:
+                attr = self.color("dim")
+            self.addstr(y + 2 + row_index, x, text, attr)
+
+    def draw(self):
+        if not self.enabled:
+            return
+        state = self.app.server_dashboard_state()
+        try:
+            self.screen.erase()
+        except Exception:
+            return
+
+        height, width = self.screen.getmaxyx()
+        if height < 24 or width < 78:
+            self.addstr(0, 0, "BATTLEZONE SERVER TUI", self.color("bold"))
+            self.addstr(2, 0, "Terminal too small. Use at least 78x24.", self.color("warn"))
+            self.screen.refresh()
+            return
+
+        self.addstr(0, 2, "BATTLEZONE ARENA SERVER", self.color("bold"))
+        self.addstr(0, max(42, width - 22), "q clean quit", self.color("dim"))
+
+        left_w = min(42, width // 2 - 2)
+        right_x = left_w + 3
+        right_w = width - right_x - 2
+
+        self.draw_box(2, 1, 8, left_w, "Arena")
+        arena = state["arena"]
+        self.draw_kv_lines(4, 3, [
+            "MODE    {}".format(arena["mode"]),
+            "STATE   {}".format(arena["state"]),
+            "UPTIME  {}".format(arena["uptime"]),
+            "ENV     {}".format(arena["environment"]),
+            "VIEW    {}".format(arena["view"]),
+        ])
+
+        self.draw_box(2, right_x, 8, right_w, "Network")
+        network = state["network"]
+        self.draw_kv_lines(4, right_x + 2, [
+            "UDP {}:{}  PROTO {}".format(network["host"], network["port"], network["protocol"]),
+            "RX {}  SNAP {}/{}".format(network["rx_input_packets"], network["snapshot_packets"], network["snapshot_frames"]),
+            "REJECT J{} I{} S{}".format(network["rejected_joins"], network["rejected_inputs"], network["rejected_sequences"]),
+            "CLAIMS {} / {}".format(network["connected_count"], network["claimable_count"]),
+        ])
+
+        self.draw_box(11, 1, 8, left_w, "Autonomy")
+        autonomy = state["autonomy"]
+        self.draw_kv_lines(13, 3, [
+            "FALLBACK ACTIVE {}".format(autonomy["fallback_active_count"]),
+            "HUMAN CLAIMS    {}".format(autonomy["human_claim_count"]),
+            "ENEMY FIRE      {}".format(autonomy["enemy_fire"]),
+            "TEAMS           {}".format(autonomy["team_model"]),
+        ])
+
+        self.draw_box(11, right_x, 8, right_w, "Claims")
+        claim_rows = [
+            (row["tank"], row["source"], row["player"], row["generation"], row["sequence"], row["heartbeat"])
+            for row in state["claims"]
+        ]
+        self.draw_table(13, right_x + 2, ("TANK", "SRC", "PLAYER", "GEN", "SEQ", "AGE"), claim_rows[:4], (5, 8, 10, 5, 7, 6))
+
+        tank_box_height = min(9, max(6, height - 29))
+        self.draw_box(20, 1, tank_box_height, width - 2, "Tanks")
+        tank_rows = [
+            (row["tank"], row["team"], row["source"], row["lives"], row["state"], row["shot"])
+            for row in state["tanks"]
+        ]
+        self.draw_table(22, 3, ("TANK", "TEAM", "SOURCE", "LIVES", "STATE", "SHOT"), tank_rows[:max(1, tank_box_height - 3)], (6, 7, 12, 7, 16, 8))
+
+        event_y = 20 + tank_box_height + 1
+        event_h = max(5, height - event_y - 1)
+        self.draw_box(event_y, 1, event_h, width - 2, "Events")
+        events = state["events"][-max(1, event_h - 3):]
+        for index, event in enumerate(events):
+            attr = self.color("normal")
+            if "reject" in event.lower() or "bad" in event.lower():
+                attr = self.color("warn")
+            if "error" in event.lower():
+                attr = self.color("error")
+            self.addstr(event_y + 2 + index, 3, event, attr)
+
+        self.screen.refresh()
+
+
 class MyApp(ShowBase):
     def __init__(self):
         ShowBase.__init__(self)
+        self.server_started_at = time.monotonic()
+        self.server_event_log = []
+        self.server_tui_dashboard = None
 
         self.ambient_snd = base.loader.loadSfx("sfx/tank_with_radar.ogg")
         self.mainShot_snd = base.loader.loadSfx("sfx/mainShot.ogg")
@@ -1663,6 +2083,7 @@ class MyApp(ShowBase):
             tanks_dict[t]["move"] = True
         self.setup_tank_control_architecture()
         self.setup_network_controller_prototype()
+        self.setup_server_operator_ui()
 
         self.taskMgr.add(self.spinCameraTask, "SpinCameraTask")
         self.taskMgr.add(self.updateTankControllersTask, "UpdateTankControllersTask")
@@ -1674,6 +2095,8 @@ class MyApp(ShowBase):
         self.taskMgr.add(self.updateAudioFocusTask, "UpdateAudioFocusTask")
         if self.network_bridge is not None:
             self.taskMgr.add(self.updateNetworkTask, "UpdateNetworkTask")
+        if self.server_tui_dashboard is not None and self.server_tui_dashboard.enabled:
+            self.taskMgr.add(self.updateServerTuiTask, "UpdateServerTuiTask")
 
         # base.messenger.toggleVerbose()
 
@@ -1772,6 +2195,12 @@ class MyApp(ShowBase):
         self.network_snapshot_history = []
         self.network_interpolation_enabled = True
         self.network_connected_tanks = []
+        self.network_claimable_tanks = sorted(CLAIMABLE_TANK_IDS, key=lambda tank_id: int(tank_id))
+        self.network_claim_metadata = {}
+        self.network_server_status = {}
+        self.network_player_id = ""
+        self.network_claim_token = ""
+        self.network_ownership_generation = 0
         self.network_join_accepted = False
         self.network_join_rejected_reason = ""
         self.network_client_controller_type = self.normalized_network_client_controller_type()
@@ -1825,6 +2254,21 @@ class MyApp(ShowBase):
     def is_network_server_low_render(self):
         return self.is_network_server_authority() and NETWORK_SERVER_LOW_RENDER
 
+    def setup_server_operator_ui(self):
+        if not self.is_network_server_authority():
+            return
+        if SERVER_UI_MODE != "tui":
+            return
+        self.server_tui_dashboard = ServerTuiDashboard(self)
+        if self.server_tui_dashboard.enabled:
+            atexit.register(self.server_tui_dashboard.close)
+            self.record_server_event("server TUI started")
+
+    def updateServerTuiTask(self, task):
+        if self.server_tui_dashboard is not None:
+            self.server_tui_dashboard.update(getattr(task, "time", ClockObject.getGlobalClock().getFrameTime()))
+        return Task.cont
+
     def network_client_mode_label(self):
         if self.network_join_rejected_reason:
             return "JOIN REJECTED"
@@ -1861,6 +2305,21 @@ class MyApp(ShowBase):
             return []
         return self.network_bridge.connected_tank_ids()
 
+    def network_claim_metadata_snapshot(self):
+        if self.network_bridge is None or not hasattr(self.network_bridge, "host_claim_snapshot"):
+            return {}
+        return self.network_bridge.host_claim_snapshot()
+
+    def network_claimable_tank_ids(self):
+        if self.network_bridge is None or not hasattr(self.network_bridge, "claimable_tank_ids"):
+            return sorted(CLAIMABLE_TANK_IDS, key=lambda tank_id: int(tank_id))
+        return self.network_bridge.claimable_tank_ids()
+
+    def network_server_status_snapshot(self):
+        if self.network_bridge is None or not hasattr(self.network_bridge, "host_status_snapshot"):
+            return {}
+        return self.network_bridge.host_status_snapshot()
+
     def network_tank_client_connected(self, tank_id):
         return tank_id in set(self.network_connected_tank_ids())
 
@@ -1868,6 +2327,147 @@ class MyApp(ShowBase):
         if not self.is_network_server_authority():
             return True
         return self.server_lobby_expected_client_tanks().issubset(set(self.network_connected_tank_ids()))
+
+    def record_server_event(self, message):
+        timestamp = time.strftime("%H:%M:%S")
+        self.server_event_log.append("{} {}".format(timestamp, message))
+        self.server_event_log = self.server_event_log[-40:]
+
+    def format_uptime(self):
+        elapsed = max(0, int(time.monotonic() - self.server_started_at))
+        hours = elapsed // 3600
+        minutes = (elapsed % 3600) // 60
+        seconds = elapsed % 60
+        if hours:
+            return "{}:{:02d}:{:02d}".format(hours, minutes, seconds)
+        return "{:02d}:{:02d}".format(minutes, seconds)
+
+    def arena_state_label(self):
+        if self.investigation_mode:
+            return "INVESTIGATE"
+        if self.game_over:
+            return "GAME OVER"
+        if self.waiting_to_start:
+            return "WAITING"
+        return "RUNNING"
+
+    def controller_source_for_tank(self, tank_id, claims=None):
+        claims = claims or self.network_claim_metadata_snapshot()
+        if tank_id in claims:
+            return claims[tank_id].get("controller", "CLIENT")
+        if tank_id not in CLAIMABLE_TANK_IDS:
+            return "RESERVED"
+        if tank_id == "0":
+            return "HUMAN SLOT"
+        return "AI POOL"
+
+    def claim_rows_for_dashboard(self, claims, status_time):
+        rows = []
+        connected = set(self.network_connected_tank_ids())
+        for tank_id in self.tank_ids_for_state():
+            claim = claims.get(tank_id, {})
+            if tank_id in connected:
+                last_seen = 0.0
+                if self.network_bridge is not None:
+                    last_seen = self.network_bridge.client_last_seen.get(tank_id, status_time)
+                heartbeat_age = "{:.1f}s".format(max(0.0, status_time - last_seen))
+                rows.append({
+                    "tank": tank_id,
+                    "source": claim.get("controller", "CLIENT"),
+                    "player": claim.get("player_id", ""),
+                    "generation": claim.get("ownership_generation", 0),
+                    "sequence": claim.get("last_input_sequence", -1),
+                    "heartbeat": heartbeat_age
+                })
+            elif tank_id in CLAIMABLE_TANK_IDS:
+                rows.append({
+                    "tank": tank_id,
+                    "source": "POOL" if tank_id != "0" else "OPEN",
+                    "player": "",
+                    "generation": "-",
+                    "sequence": "-",
+                    "heartbeat": "-"
+                })
+            else:
+                rows.append({
+                    "tank": tank_id,
+                    "source": "RESERVED",
+                    "player": "",
+                    "generation": "-",
+                    "sequence": "-",
+                    "heartbeat": "-"
+                })
+        return rows
+
+    def tank_rows_for_dashboard(self, claims):
+        rows = []
+        for tank_id in self.tank_ids_for_state():
+            if self.tank_lives(tank_id) is None:
+                lives = "-"
+            else:
+                lives = str(int(self.tank_lives(tank_id)))
+            if self.tank_is_reconstituting(tank_id):
+                state = "RECONSTITUTING"
+            elif not self.tank_is_alive(tank_id):
+                state = "DEAD"
+            else:
+                state = "ALIVE"
+            rows.append({
+                "tank": tank_id,
+                "team": "T{}".format(tank_id),
+                "source": self.controller_source_for_tank(tank_id, claims),
+                "lives": lives,
+                "state": state,
+                "shot": "SHOT" if self.tank_is_shooting(tank_id) else "IDLE"
+            })
+        return rows
+
+    def server_dashboard_state(self):
+        claims = self.network_claim_metadata_snapshot()
+        network = self.network_server_status_snapshot()
+        status_time = ClockObject.getGlobalClock().getFrameTime()
+        connected_tanks = set(self.network_connected_tank_ids())
+        fallback_active_count = len([
+            tank_id for tank_id in CLAIMABLE_TANK_IDS
+            if tank_id != "0" and tank_id not in connected_tanks
+        ])
+        human_claim_count = len([
+            claim for claim in claims.values()
+            if str(claim.get("controller", "")).upper() == "HUMAN"
+        ])
+        environment = self.selected_environment()["name"] if hasattr(self, "environment_index") else ""
+        return {
+            "arena": {
+                "mode": "SERVER",
+                "state": self.arena_state_label(),
+                "uptime": self.format_uptime(),
+                "environment": environment,
+                "view": "PREVIEW" if self.waiting_to_start else "LIVE"
+            },
+            "network": {
+                "host": network.get("host", NETWORK_HOST),
+                "port": network.get("port", NETWORK_PORT),
+                "protocol": NETWORK_PROTOCOL_VERSION,
+                "transport": "UDP",
+                "claimable_count": network.get("claimable_count", len(CLAIMABLE_TANK_IDS)),
+                "connected_count": network.get("connected_count", len(connected_tanks)),
+                "rx_input_packets": network.get("rx_input_packets", 0),
+                "snapshot_frames": network.get("snapshot_frames", 0),
+                "snapshot_packets": network.get("snapshot_packets", 0),
+                "rejected_joins": network.get("rejected_joins", 0),
+                "rejected_inputs": network.get("rejected_inputs", 0),
+                "rejected_sequences": network.get("rejected_sequences", 0),
+            },
+            "claims": self.claim_rows_for_dashboard(claims, status_time),
+            "tanks": self.tank_rows_for_dashboard(claims),
+            "autonomy": {
+                "fallback_active_count": fallback_active_count,
+                "human_claim_count": human_claim_count,
+                "enemy_fire": "SUSPENDED" if self.enemy_shooting_suspended else "ENABLED",
+                "team_model": "TEAMS OF ONE"
+            },
+            "events": list(self.server_event_log)
+        }
 
     def primary_player_target_available(self):
         if self.is_network_server_authority():
@@ -1924,7 +2524,12 @@ class MyApp(ShowBase):
         controller_types = {}
         if self.network_bridge is not None:
             controller_types = getattr(self.network_bridge, "client_controller_types", {})
-        self.update_server_lobby_overlay(connected_tanks, controller_types)
+        self.update_server_lobby_overlay(
+            connected_tanks,
+            controller_types,
+            self.network_claim_metadata_snapshot(),
+            self.network_server_status_snapshot()
+        )
         self.position_lives_table()
         if self.waiting_to_start:
             self.startTextObject.hide()
@@ -2196,27 +2801,37 @@ class MyApp(ShowBase):
             for name, lives_text in self.tank_lives_rows()
         ])
 
-    def server_lobby_rows(self, connected_tanks=None, controller_types=None):
+    def server_lobby_rows(self, connected_tanks=None, controller_types=None, claims=None):
         connected = set(connected_tanks or [])
         controller_types = controller_types or {}
+        claims = claims or {}
         rows = []
         for tank_id in self.tank_ids_for_state():
             lives = self.tank_lives(tank_id)
             lives_text = "-" if lives is None else str(int(lives))
-            if tank_id in connected:
+            claim_text = "OPEN"
+            if tank_id not in CLAIMABLE_TANK_IDS:
+                controller = "LOCKED"
+                link_state = "RESERVED"
+            elif tank_id in connected:
                 controller = controller_types.get(tank_id, "CLIENT")
+                claim = claims.get(tank_id, {})
+                generation = int(claim.get("ownership_generation", 0))
+                sequence = int(claim.get("last_input_sequence", -1))
+                claim_text = "G{} #{}".format(generation, max(sequence, 0))
                 link_state = "JOINED"
             elif tank_id == "0":
                 controller = "HUMAN"
                 link_state = "WAITING"
             else:
                 controller = "AI"
+                claim_text = "POOL"
                 link_state = "SERVER"
-            rows.append((tank_id, controller, lives_text, link_state))
+            rows.append((tank_id, controller, lives_text, claim_text, link_state))
         return rows
 
     def server_lobby_expected_client_tanks(self):
-        return {"0"}
+        return {"0"} if "0" in CLAIMABLE_TANK_IDS else set()
 
     def set_tank_hit_cooldown(self, tank_id, seconds):
         self.tank_lifecycle_state(tank_id)["hit_cooldown_until"] = ClockObject.getGlobalClock().getFrameTime() + seconds
@@ -2467,6 +3082,9 @@ class MyApp(ShowBase):
             "tank_hit_event_serial": self.tank_hit_event_serial,
             "tank_hit_event": self.last_tank_hit_event,
             "connected_tanks": self.network_connected_tank_ids(),
+            "claimable_tanks": self.network_claimable_tank_ids(),
+            "claims": self.network_claim_metadata_snapshot(),
+            "server_status": self.network_server_status_snapshot(),
             "protocol": NETWORK_PROTOCOL_VERSION,
             "tanks": {},
             "shots": {}
@@ -2496,6 +3114,9 @@ class MyApp(ShowBase):
         self.enemy_shooting_suspended = bool(snapshot.get("enemy_shooting_suspended", self.enemy_shooting_suspended))
         self.update_network_client_audio_state(self.waiting_to_start, self.game_over)
         self.network_connected_tanks = snapshot.get("connected_tanks", [])
+        self.network_claimable_tanks = snapshot.get("claimable_tanks", self.network_claimable_tanks)
+        self.network_claim_metadata = snapshot.get("claims", {})
+        self.network_server_status = snapshot.get("server_status", {})
         self.player_lives = int(snapshot.get("player_lives", self.player_lives))
         for tank_id, tank_state in snapshot.get("tanks", {}).items():
             if tank_id in self.tank_lifecycle and tank_state.get("lives") is not None:
@@ -3179,6 +3800,8 @@ class MyApp(ShowBase):
             self.set_tank_alive("0", False)
             self.set_tank_reconstituting("0", True)
             self.record_player_tank_hit_effect(shooter_id, shot_start, shot_end)
+            if self.is_network_server_authority():
+                self.record_server_event("death tank 0")
             self.make_investigation_persistent_for_game_over()
             self.end_game()
 
@@ -3210,6 +3833,8 @@ class MyApp(ShowBase):
             self.set_tank_alive("0", False)
             self.set_tank_reconstituting("0", True)
             self.record_player_tank_hit_effect(shooter_id, shot_start, shot_end)
+            if self.is_network_server_authority():
+                self.record_server_event("death tank 0")
             self.make_investigation_persistent_for_game_over()
             self.end_game()
 
@@ -3240,6 +3865,9 @@ class MyApp(ShowBase):
             self.player_hit_effect_serial = self.tank_hit_event_serial
             self.player_hit_effect_pos = Point3(pos)
             self.player_hit_effect_hpr = hpr
+
+        if self.is_network_server_authority():
+            self.record_server_event("hit tank {} by {}".format(victim_id, shooter_id if shooter_id is not None else "?"))
 
         if play_local:
             self.play_tank_hit_effect(victim_id, pos, hpr)
@@ -3354,6 +3982,8 @@ class MyApp(ShowBase):
             return
 
         self.waiting_to_start = False
+        if self.is_network_server_authority():
+            self.record_server_event("arena started")
         self.camera.setPos(render, self.terrain_position(Point3(0, 0, 0), PLAYER_CAMERA_HEIGHT))
         self.camera.setHpr(0, 0, 0)
         self.set_player_camera_on_terrain()
@@ -3591,6 +4221,8 @@ class MyApp(ShowBase):
             self.investigateTimerRoot.hide()
 
         self.game_over = False
+        if self.is_network_server_authority():
+            self.record_server_event("arena restarted")
         self.last_player_hit_time = -PLAYER_HIT_COOLDOWN
         self.set_tank_alive("0", True)
         self.set_tank_reconstituting("0", False)
@@ -4126,22 +4758,22 @@ class MyApp(ShowBase):
         self.serverLobbyRoot = aspect2d.attachNewNode("ServerLobby")
         self.serverLobbyRoot.setBin("fixed", 20)
         panel = CardMaker("server-lobby-panel")
-        panel.setFrame(-0.82, 0.82, -0.44, 0.44)
+        panel.setFrame(-0.94, 0.94, -0.48, 0.48)
         panel_np = self.serverLobbyRoot.attachNewNode(panel.generate())
         panel_np.setTransparency(TransparencyAttrib.MAlpha)
         panel_np.setColorScale(0.0, 0.035, 0.015, 0.88)
 
         frame = LineSegs("server-lobby-frame")
         frame.setThickness(2)
-        frame.moveTo(-0.82, 0, -0.44)
-        frame.drawTo(0.82, 0, -0.44)
-        frame.drawTo(0.82, 0, 0.44)
-        frame.drawTo(-0.82, 0, 0.44)
-        frame.drawTo(-0.82, 0, -0.44)
-        frame.moveTo(-0.70, 0, 0.14)
-        frame.drawTo(0.70, 0, 0.14)
-        frame.moveTo(-0.70, 0, -0.08)
-        frame.drawTo(0.70, 0, -0.08)
+        frame.moveTo(-0.94, 0, -0.48)
+        frame.drawTo(0.94, 0, -0.48)
+        frame.drawTo(0.94, 0, 0.48)
+        frame.drawTo(-0.94, 0, 0.48)
+        frame.drawTo(-0.94, 0, -0.48)
+        frame.moveTo(-0.82, 0, 0.13)
+        frame.drawTo(0.82, 0, 0.13)
+        frame.moveTo(-0.82, 0, -0.11)
+        frame.drawTo(0.82, 0, -0.11)
         frame_np = self.serverLobbyRoot.attachNewNode(frame.create())
         frame_np.setColorScale(0.0, 0.62, 0.22, 1)
 
@@ -4158,20 +4790,26 @@ class MyApp(ShowBase):
             scale=(0.029, 0.043), fg=(0.34, 1.0, 0.42, 1), mayChange=True
         )
         self.serverLobbyPromptObject = OnscreenText(
-            text="", pos=(0, -0.34), align=TextNode.ACenter,
+            text="", pos=(0, -0.38), align=TextNode.ACenter,
             scale=(0.034, 0.05), fg=(0.55, 1.0, 0.55, 1), mayChange=True
+        )
+        self.serverLobbyMetricsObject = OnscreenText(
+            text="", pos=(-0.68, -0.055), align=TextNode.ALeft,
+            scale=(0.021, 0.032), fg=(0.16, 0.78, 0.3, 1), mayChange=True
         )
         for obj in (
             self.serverLobbyTitleObject,
             self.serverLobbySubtitleObject,
             self.serverLobbyStatusObject,
             self.serverLobbyPromptObject,
+            self.serverLobbyMetricsObject,
         ):
             obj.reparentTo(self.serverLobbyRoot)
 
         self.serverLobbyHeaderObjects = []
-        headers = (("TANK", -0.58, TextNode.ALeft), ("CTRL", -0.14, TextNode.ALeft),
-                   ("LIVES", 0.22, TextNode.ARight), ("LINK", 0.58, TextNode.ARight))
+        headers = (("TANK", -0.72, TextNode.ALeft), ("CTRL", -0.34, TextNode.ALeft),
+                   ("LIVES", -0.03, TextNode.ARight), ("CLAIM", 0.28, TextNode.ARight),
+                   ("LINK", 0.72, TextNode.ARight))
         for text, x, align in headers:
             header = OnscreenText(
                 text=text, pos=(x, 0.02), align=align,
@@ -4182,10 +4820,11 @@ class MyApp(ShowBase):
 
         self.serverLobbyRowObjects = []
         for row_index, tank_id in enumerate(self.tank_ids_for_state()):
-            z = -0.055 - row_index * 0.07
+            z = -0.16 - row_index * 0.065
             row = []
-            row_specs = ((-0.58, TextNode.ALeft), (-0.14, TextNode.ALeft),
-                         (0.22, TextNode.ARight), (0.58, TextNode.ARight))
+            row_specs = ((-0.72, TextNode.ALeft), (-0.34, TextNode.ALeft),
+                         (-0.03, TextNode.ARight), (0.28, TextNode.ARight),
+                         (0.72, TextNode.ARight))
             for x, align in row_specs:
                 text_obj = OnscreenText(
                     text="", pos=(x, z), align=align,
@@ -4207,18 +4846,34 @@ class MyApp(ShowBase):
             self.serverLobbyRoot.hide()
             self.serverLobbyDimNp.hide()
 
-    def update_server_lobby_overlay(self, connected_tanks=None, controller_types=None):
+    def update_server_lobby_overlay(self, connected_tanks=None, controller_types=None, claims=None, status=None):
         if not hasattr(self, "serverLobbyRoot"):
             return
-        rows = self.server_lobby_rows(connected_tanks, controller_types)
+        claims = claims or {}
+        status = status or {}
+        rows = self.server_lobby_rows(connected_tanks, controller_types, claims)
         expected_tanks = self.server_lobby_expected_client_tanks()
         connected = len(expected_tanks.intersection(set(connected_tanks or [])))
         expected_clients = len(expected_tanks)
         client_word = "CLIENT" if expected_clients == 1 else "CLIENTS"
-        self.serverLobbyStatusObject.text = "{} / {} {} CONNECTED".format(
+        self.serverLobbyStatusObject.text = "{} / {} {} CONNECTED | CLAIMS {} / {}".format(
             connected,
             expected_clients,
-            client_word
+            client_word,
+            status.get("connected_count", len(connected_tanks or [])),
+            status.get("claimable_count", len(CLAIMABLE_TANK_IDS))
+        )
+        self.serverLobbyMetricsObject.text = (
+            "HOST {host}:{port}  RX {rx}  SNAP {snap}/{frames}  REJECT J{rej_join} I{rej_input} S{rej_seq}"
+        ).format(
+            host=status.get("host", NETWORK_HOST),
+            port=status.get("port", NETWORK_PORT),
+            rx=status.get("rx_input_packets", 0),
+            snap=status.get("snapshot_packets", 0),
+            frames=status.get("snapshot_frames", 0),
+            rej_join=status.get("rejected_joins", 0),
+            rej_input=status.get("rejected_inputs", 0),
+            rej_seq=status.get("rejected_sequences", 0)
         )
         if connected >= expected_clients:
             self.serverLobbyPromptObject.text = "CLIENT READY TO START"
@@ -4228,10 +4883,16 @@ class MyApp(ShowBase):
             self.serverLobbyPromptObject.setFg((0.16, 0.72, 0.28, 1))
         for row_index, row_values in enumerate(rows):
             row_objects = self.serverLobbyRowObjects[row_index]
-            tank_id, controller, lives_text, link_state = row_values
-            display_values = ("TANK {}".format(tank_id), controller, lives_text, link_state)
-            linked = link_state != "WAITING"
-            row_color = (0.42, 1.0, 0.42, 1) if linked else (0.12, 0.55, 0.22, 1)
+            tank_id, controller, lives_text, claim_text, link_state = row_values
+            display_values = ("TANK {}".format(tank_id), controller, lives_text, claim_text, link_state)
+            if link_state == "RESERVED":
+                row_color = (0.08, 0.32, 0.16, 1)
+            elif link_state == "WAITING":
+                row_color = (0.12, 0.55, 0.22, 1)
+            elif link_state == "SERVER":
+                row_color = (0.2, 0.76, 0.3, 1)
+            else:
+                row_color = (0.42, 1.0, 0.42, 1)
             for text_obj, value in zip(row_objects, display_values):
                 text_obj.text = value
                 text_obj.setFg(row_color)
@@ -5267,6 +5928,8 @@ class MyApp(ShowBase):
         self.set_tank_hit_cooldown(tank_id, PLAYER_HIT_COOLDOWN)
         self.set_tank_lives(tank_id, max(0, self.tank_lives(tank_id) - 1))
         self.update_lives_hud()
+        if self.tank_lives(tank_id) <= 0 and self.is_network_server_authority():
+            self.record_server_event("death tank {}".format(tank_id))
         tanks_dict[tank_id]["move"] = False
         tanks_dict[tank_id]["tank"].hide()
         tanks_dict[tank_id]["frags"].showThrough()
