@@ -28,6 +28,31 @@ Or from PowerShell on Windows:
 .\run.ps1
 ```
 
+## Network Server
+
+Authoritative server with the terminal dashboard:
+
+```powershell
+cd C:\Users\cseel\myProjects\mybattlezone
+$env:BATTLEZONE_NET_MODE="server"
+$env:BATTLEZONE_SERVER_UI="tui"
+python test02.py
+```
+
+Tank 0 human client on the same machine:
+
+```powershell
+cd C:\Users\cseel\myProjects\mybattlezone
+$env:BATTLEZONE_NET_MODE="client"
+$env:BATTLEZONE_NET_HOST="127.0.0.1"
+$env:BATTLEZONE_NET_TANK="0"
+$env:BATTLEZONE_NET_CONTROLLER="human"
+$env:BATTLEZONE_NET_CLIENT_LOW_RENDER="0"
+python test02.py
+```
+
+Use `BATTLEZONE_NET_HOST="0.0.0.0"` on the server when accepting LAN clients, and use the server machine's LAN IP on the client.
+
 ## Controls
 
 - Arrow keys: move and turn

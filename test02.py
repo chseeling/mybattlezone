@@ -118,6 +118,16 @@ def configured_claimable_tanks():
 
 CLAIMABLE_TANK_IDS = configured_claimable_tanks()
 
+def configured_server_ui_mode():
+    requested = os.environ.get("BATTLEZONE_SERVER_UI", "").lower()
+    if requested:
+        return requested
+
+    legacy_tui = os.environ.get("BATTLEZONE_SERVER_TUI", "").lower()
+    if legacy_tui in {"1", "true", "yes", "on", "tui", "curses"}:
+        return "tui"
+    return "panda"
+
 DEBUG = os.environ.get("BATTLEZONE_DEBUG", "").lower() in {"1", "true", "yes", "on"}
 NETWORK_MODE = os.environ.get("BATTLEZONE_NET_MODE", "").lower()
 if NETWORK_MODE == "server":
@@ -143,7 +153,7 @@ NETWORK_CLIENT_LOW_RENDER = os.environ.get("BATTLEZONE_NET_CLIENT_LOW_RENDER", N
 NETWORK_CLIENT_LOW_RENDER_SIZE = (960, 540)
 NETWORK_SERVER_LOW_RENDER = os.environ.get("BATTLEZONE_NET_SERVER_LOW_RENDER", "1").lower() in {"1", "true", "yes", "on"}
 NETWORK_SERVER_LOW_RENDER_SIZE = (720, 405)
-SERVER_UI_MODE = os.environ.get("BATTLEZONE_SERVER_UI", "panda").lower()
+SERVER_UI_MODE = configured_server_ui_mode()
 SERVER_TUI_WINDOW_MODE = os.environ.get("BATTLEZONE_SERVER_TUI_WINDOW", "minimized").lower()
 AUDIO_FOCUS_MUTE_DEFAULT = "0" if (
     NETWORK_MODE == "client" and
@@ -184,6 +194,7 @@ PLAYER_FLASH_SECONDS = 0.45
 PLAYER_HIT_SHAKE_SECONDS = 0.32
 PLAYER_HIT_SHAKE_YAW = 1.2
 PLAYER_HIT_SHAKE_PITCH = 0.7
+PLAYER_RESTART_GRACE_SECONDS = 1.0
 PLAYER_COLLISION_RADIUS = 1.5
 PLAYER_HIT_COLLISION_RADIUS = 1.45
 PLAYER_HIT_COLLISION_CENTER_Z = -1.15
@@ -214,6 +225,12 @@ TACTICAL_AI_FIRE_COOLDOWN = 3.6
 TACTICAL_AI_AIM_DWELL_SECONDS = 0.55
 TACTICAL_AI_SHOT_VERTICAL_JITTER = 0.22
 TACTICAL_AI_SHOT_LATERAL_JITTER = 0.55
+TACTICAL_AI_FIRE_COOLDOWN_VARIATION = 0.9
+TACTICAL_AI_OPENING_FIRE_STAGGER = 1.6
+TACTICAL_AI_MANEUVER_VARIATION = 1.1
+TACTICAL_AI_AIM_DWELL_VARIATION = 0.28
+AI_SHOT_SPREAD_YAW_DEGREES = 2.2
+AI_SHOT_SPREAD_PITCH_DEGREES = 1.0
 TANK_RESPAWN_ATTACK_COOLDOWN = 5.0
 TANK_FIRE_COOLDOWN = 1.1
 PLAYER_BARREL_TILT_MIN = -8.0
@@ -826,6 +843,7 @@ class UdpTankInputBridge:
         self.client_join_status = {}
         self.client_controller_types = {}
         self.client_player_ids = {}
+        self.client_join_order = []
         self.client_claim_tokens = {}
         self.client_claim_generations = {}
         self.client_last_input_sequences = {}
@@ -925,6 +943,9 @@ class UdpTankInputBridge:
             if message_type == "investigation":
                 self.handle_host_investigation(message, addr)
                 continue
+            if message_type == "terrain":
+                self.handle_host_terrain(message, addr)
+                continue
 
             if message_type != "input":
                 continue
@@ -959,6 +980,9 @@ class UdpTankInputBridge:
             return
 
         self.app.record_server_event("join accepted tank {} {}".format(tank_id, self.client_controller_types.get(tank_id, "CLIENT")))
+        if tank_id == "0":
+            self.app.return_to_lobby_after_game_over("tank 0 joined")
+        self.app.assign_lobby_terrain_authority_if_needed()
         self.send_host_join_ack(addr, tank_id, True, "")
 
     def next_host_player_id(self):
@@ -991,6 +1015,7 @@ class UdpTankInputBridge:
         if controller:
             self.client_controller_types[tank_id] = str(controller).upper()
         self.client_player_ids[tank_id] = self.next_host_player_id()
+        self.client_join_order.append(self.client_player_ids[tank_id])
         generation = self.next_host_claim_generation(tank_id)
         self.client_claim_generations[tank_id] = generation
         self.client_claim_tokens[tank_id] = self.build_host_claim_token(tank_id, generation)
@@ -1038,16 +1063,20 @@ class UdpTankInputBridge:
         if addr is not None and existing_addr != addr:
             return False
 
+        player_id = self.client_player_ids.get(tank_id, "")
         self.client_addrs.pop(tank_id, None)
         self.client_last_seen.pop(tank_id, None)
         self.client_join_status.pop(tank_id, None)
         self.client_controller_types.pop(tank_id, None)
         self.client_player_ids.pop(tank_id, None)
+        if player_id in self.client_join_order:
+            self.client_join_order.remove(player_id)
         self.client_claim_tokens.pop(tank_id, None)
         self.client_claim_generations.pop(tank_id, None)
         self.client_last_input_sequences.pop(tank_id, None)
         self.app.submit_remote_tank_input(tank_id, throttle=0.0, turn=0.0, fire=False, barrel_tilt=0.0)
         self.app.clear_remote_control_tank(tank_id)
+        self.app.handle_lobby_player_disconnected(player_id)
         self.app.record_server_event("claim {} tank {}".format(reason, tank_id))
         return True
 
@@ -1098,6 +1127,36 @@ class UdpTankInputBridge:
             self.app.exit_investigation()
             self.app.record_server_event("investigation resume")
 
+    def handle_host_terrain(self, message, addr):
+        tank_id = str(message.get("tank_id", self.tank_id))
+        if tank_id not in network_tank_ids():
+            return
+        if not self.host_claim_identity_matches(tank_id, addr, message):
+            return
+
+        action = str(message.get("action", "set"))
+        index = message.get("environment_index")
+        try:
+            index = None if index is None else int(index)
+        except (TypeError, ValueError):
+            index = None
+        player_id = self.client_player_ids.get(tank_id, "")
+        self.app.request_lobby_terrain_change(player_id, tank_id, action, index)
+
+    def connected_player_rows(self):
+        by_player = {}
+        for tank_id, player_id in self.client_player_ids.items():
+            by_player[player_id] = {
+                "player_id": player_id,
+                "tank_id": tank_id,
+                "controller": self.client_controller_types.get(tank_id, "CLIENT")
+            }
+        rows = [by_player[player_id] for player_id in self.client_join_order if player_id in by_player]
+        for player_id, row in by_player.items():
+            if player_id not in self.client_join_order:
+                rows.append(row)
+        return rows
+
     def host_claim_snapshot(self):
         claims = {}
         for tank_id in self.connected_tank_ids():
@@ -1115,6 +1174,9 @@ class UdpTankInputBridge:
             "port": self.port,
             "claimable_count": len(CLAIMABLE_TANK_IDS),
             "connected_count": len(self.client_addrs),
+            "terrain_authority_player_id": self.app.terrain_authority_player_id,
+            "terrain_authority_tank_id": self.app.terrain_authority_tank_id,
+            "terrain_locked": self.app.terrain_selection_locked(),
             "rx_input_packets": self.last_packet_count,
             "snapshot_frames": self.snapshot_frame_count,
             "snapshot_packets": self.snapshot_packet_count,
@@ -1359,6 +1421,27 @@ class UdpTankInputBridge:
         except OSError:
             self.mark_client_disconnected()
 
+    def send_client_terrain(self, action, environment_index=None):
+        if self.mode != "client" or not hasattr(self, "server_addr"):
+            return
+        if not self.join_accepted:
+            return
+
+        payload = {
+            "type": "terrain",
+            "protocol": NETWORK_PROTOCOL_VERSION,
+            "tank_id": self.tank_id,
+            "claim_token": self.claim_token,
+            "ownership_generation": self.ownership_generation,
+            "action": str(action)
+        }
+        if environment_index is not None:
+            payload["environment_index"] = int(environment_index)
+        try:
+            self.socket.sendto(json.dumps(payload).encode("utf-8"), self.server_addr)
+        except OSError:
+            self.mark_client_disconnected()
+
     def send_client_input(self, task_time):
         if not self.join_accepted:
             return
@@ -1399,6 +1482,9 @@ class UdpTankInputBridge:
         self.app.network_player_id = ""
         self.app.network_claim_token = ""
         self.app.network_ownership_generation = 0
+        self.app.network_terrain_authority_player_id = ""
+        self.app.network_terrain_authority_tank_id = ""
+        self.app.network_terrain_locked = False
         self.app.network_claim_metadata = {}
         self.app.network_snapshot_received = False
         self.app.network_snapshot_shot_visible = {}
@@ -1530,19 +1616,56 @@ class SineAiTankController(TankController):
 class TacticalAiTankController(TankController):
     def __init__(self, tank_id):
         self.tank_id = tank_id
+        tank_number = int(tank_id)
         self.reposition_until = 0
-        self.strafe_sign = 1 if int(tank_id) % 2 else -1
+        self.strafe_sign = 1 if tank_number % 2 else -1
         self.next_fire_time = 0
         self.aim_acquired_since = None
-        self.next_maneuver_time = 1.0 + int(tank_id) * 0.7
-        self.ideal_range = TACTICAL_AI_IDEAL_RANGE + (int(tank_id) - 2) * 8.0
-        self.min_range = TACTICAL_AI_MIN_RANGE + (int(tank_id) - 2) * 3.0
-        self.max_range = TACTICAL_AI_MAX_RANGE + (int(tank_id) - 2) * 9.0
-        self.base_strafe_weight = 0.62 + int(tank_id) * 0.08
+        self.opening_fire_delay = 0.65 + tank_number * 0.45 + random() * TACTICAL_AI_OPENING_FIRE_STAGGER
+        self.opening_maneuver_delay = 0.8 + tank_number * 0.55 + random() * TACTICAL_AI_MANEUVER_VARIATION
+        self.fire_cooldown = (
+            TACTICAL_AI_FIRE_COOLDOWN +
+            (random() - 0.5) * TACTICAL_AI_FIRE_COOLDOWN_VARIATION +
+            tank_number * 0.12
+        )
+        self.aim_dwell_seconds = max(
+            0.25,
+            TACTICAL_AI_AIM_DWELL_SECONDS +
+            (random() - 0.5) * TACTICAL_AI_AIM_DWELL_VARIATION
+        )
+        self.reposition_seconds = TACTICAL_AI_REPOSITION_SECONDS + (random() - 0.5) * TACTICAL_AI_MANEUVER_VARIATION
+        self.maneuver_interval_seconds = (
+            TACTICAL_AI_MANEUVER_INTERVAL_SECONDS +
+            tank_number * 0.45 +
+            random() * TACTICAL_AI_MANEUVER_VARIATION
+        )
+        self.maneuver_duration_seconds = (
+            TACTICAL_AI_MANEUVER_DURATION_SECONDS +
+            (random() - 0.5) * TACTICAL_AI_MANEUVER_VARIATION
+        )
+        self.post_shot_maneuver_seconds = (
+            TACTICAL_AI_POST_SHOT_MANEUVER_SECONDS +
+            random() * TACTICAL_AI_MANEUVER_VARIATION
+        )
+        self.respawn_attack_delay = TANK_RESPAWN_ATTACK_COOLDOWN + random() * TACTICAL_AI_OPENING_FIRE_STAGGER
+        self.aim_jitter_interval = 0.55 + random() * 0.65
+        self.next_maneuver_time = self.opening_maneuver_delay
+        self.ideal_range = TACTICAL_AI_IDEAL_RANGE + (tank_number - 2) * 8.0 + (random() - 0.5) * 10.0
+        self.min_range = TACTICAL_AI_MIN_RANGE + (tank_number - 2) * 3.0 + (random() - 0.5) * 5.0
+        self.max_range = TACTICAL_AI_MAX_RANGE + (tank_number - 2) * 9.0 + (random() - 0.5) * 12.0
+        self.base_strafe_weight = 0.62 + tank_number * 0.08 + (random() - 0.5) * 0.16
         self.aim_heading_jitter = 0.0
         self.aim_tilt_jitter = 0.0
         self.next_aim_jitter_time = 0.0
         self.debug_state = "INIT"
+
+    def reset_for_match(self, task_time):
+        self.reposition_until = task_time + random() * 0.35
+        self.next_fire_time = task_time + self.opening_fire_delay
+        self.next_maneuver_time = task_time + self.opening_maneuver_delay
+        self.aim_acquired_since = None
+        self.next_aim_jitter_time = task_time + random() * self.aim_jitter_interval
+        self.strafe_sign = -self.strafe_sign
 
     def command(self, app, avatar, dt, task_time):
         tank_can_move = True if self.tank_id == "0" else tanks_dict[self.tank_id]["move"]
@@ -1566,21 +1689,20 @@ class TacticalAiTankController(TankController):
             observation["distance_to_player"] < self.min_range or
             observation["distance_to_player"] > self.max_range
         ):
-            self.reposition_until = task_time + TACTICAL_AI_REPOSITION_SECONDS
+            self.reposition_until = task_time + self.reposition_seconds
             self.strafe_sign *= -1
         elif task_time >= self.next_maneuver_time:
-            self.reposition_until = task_time + TACTICAL_AI_MANEUVER_DURATION_SECONDS
+            self.reposition_until = task_time + self.maneuver_duration_seconds
             self.next_maneuver_time = (
                 task_time +
-                TACTICAL_AI_MANEUVER_INTERVAL_SECONDS +
-                int(self.tank_id) * 0.45
+                self.maneuver_interval_seconds
             )
             self.strafe_sign *= -1
 
         if task_time >= self.next_aim_jitter_time:
             self.aim_heading_jitter = (random() - 0.5) * TACTICAL_AI_SHOT_LATERAL_JITTER
             self.aim_tilt_jitter = (random() - 0.5) * TACTICAL_AI_SHOT_VERTICAL_JITTER
-            self.next_aim_jitter_time = task_time + 0.75
+            self.next_aim_jitter_time = task_time + self.aim_jitter_interval
 
         aim_heading = observation["heading_to_player"] + self.aim_heading_jitter
         desired_barrel_tilt = observation["barrel_tilt_target"] + self.aim_tilt_jitter
@@ -1601,7 +1723,7 @@ class TacticalAiTankController(TankController):
 
         aim_dwell_complete = (
             self.aim_acquired_since is not None and
-            task_time - self.aim_acquired_since >= TACTICAL_AI_AIM_DWELL_SECONDS
+            task_time - self.aim_acquired_since >= self.aim_dwell_seconds
         )
         can_fire = (
             firing_lane and
@@ -1614,14 +1736,14 @@ class TacticalAiTankController(TankController):
         )
         if can_fire:
             self.debug_state = "RFIRE" if observation["risky_line_of_sight"] and not observation["line_of_sight"] else "FIRE"
-            self.next_fire_time = task_time + TACTICAL_AI_FIRE_COOLDOWN
+            self.next_fire_time = task_time + self.fire_cooldown
             self.reposition_until = max(
                 self.reposition_until,
-                task_time + TACTICAL_AI_POST_SHOT_MANEUVER_SECONDS
+                task_time + self.post_shot_maneuver_seconds
             )
             self.next_maneuver_time = max(
                 self.next_maneuver_time,
-                task_time + TACTICAL_AI_POST_SHOT_MANEUVER_SECONDS
+                task_time + self.post_shot_maneuver_seconds
             )
             self.strafe_sign *= -1
             desired_world = self.choose_reposition_target(observation, task_time)
@@ -1871,13 +1993,14 @@ class ServerTuiDashboard:
         right_x = left_w + 3
         right_w = width - right_x - 2
 
-        self.draw_box(2, 1, 8, left_w, "Arena")
+        self.draw_box(2, 1, 9, left_w, "Arena")
         arena = state["arena"]
         self.draw_kv_lines(4, 3, [
             "MODE    {}".format(arena["mode"]),
             "STATE   {}".format(arena["state"]),
             "UPTIME  {}".format(arena["uptime"]),
             "ENV     {}".format(arena["environment"]),
+            "AUTH    {}".format(arena["terrain_authority"]),
             "VIEW    {}".format(arena["view"]),
         ])
 
@@ -1935,6 +2058,8 @@ class MyApp(ShowBase):
         self.server_started_at = time.monotonic()
         self.server_event_log = []
         self.server_tui_dashboard = None
+        self.terrain_authority_player_id = ""
+        self.terrain_authority_tank_id = ""
 
         self.ambient_snd = base.loader.loadSfx("sfx/tank_with_radar.ogg")
         self.mainShot_snd = base.loader.loadSfx("sfx/mainShot.ogg")
@@ -2031,6 +2156,9 @@ class MyApp(ShowBase):
         self.tank_hit_event_serial = 0
         self.last_tank_hit_event = {}
         self.network_tank_hit_event_serial = 0
+        self.shot_ground_burst_serial = 0
+        self.last_shot_ground_burst_event = {}
+        self.network_shot_ground_burst_serial = 0
         self.player_tank_visual_hidden_for_effect = False
 
         # render enemy tank round
@@ -2250,6 +2378,9 @@ class MyApp(ShowBase):
         self.network_player_id = ""
         self.network_claim_token = ""
         self.network_ownership_generation = 0
+        self.network_terrain_authority_player_id = ""
+        self.network_terrain_authority_tank_id = ""
+        self.network_terrain_locked = False
         self.network_join_accepted = False
         self.network_join_rejected_reason = ""
         self.network_client_controller_type = self.normalized_network_client_controller_type()
@@ -2399,6 +2530,75 @@ class MyApp(ShowBase):
         suffix = "" if source is None else " {}".format(source)
         self.record_server_event("fire tank {}{}".format(tank_id, suffix))
 
+    def terrain_selection_locked(self):
+        return not getattr(self, "waiting_to_start", False)
+
+    def terrain_authority_label(self):
+        if self.terrain_selection_locked():
+            return "LOCKED"
+        if self.terrain_authority_player_id:
+            return "{} T{}".format(self.terrain_authority_player_id, self.terrain_authority_tank_id)
+        return "SERVER"
+
+    def connected_lobby_players(self):
+        if self.network_bridge is None or not hasattr(self.network_bridge, "connected_player_rows"):
+            return []
+        return self.network_bridge.connected_player_rows()
+
+    def assign_lobby_terrain_authority_if_needed(self):
+        if self.terrain_selection_locked() or self.terrain_authority_player_id:
+            return
+        players = self.connected_lobby_players()
+        if not players:
+            return
+        first = players[0]
+        self.terrain_authority_player_id = first.get("player_id", "")
+        self.terrain_authority_tank_id = first.get("tank_id", "")
+        if self.terrain_authority_player_id and self.is_network_server_authority():
+            self.record_server_event("terrain authority {}".format(self.terrain_authority_player_id))
+
+    def handle_lobby_player_disconnected(self, player_id):
+        if self.terrain_selection_locked() or not player_id:
+            return
+        if player_id != self.terrain_authority_player_id:
+            return
+        self.terrain_authority_player_id = ""
+        self.terrain_authority_tank_id = ""
+        self.assign_lobby_terrain_authority_if_needed()
+        if not self.terrain_authority_player_id and self.is_network_server_authority():
+            self.record_server_event("terrain authority SERVER")
+
+    def player_has_terrain_authority(self, player_id):
+        return bool(player_id) and player_id == self.terrain_authority_player_id
+
+    def request_lobby_terrain_change(self, player_id, tank_id, action, environment_index=None):
+        if self.terrain_selection_locked():
+            self.record_server_event("terrain rejected {} match running".format(player_id or "?"))
+            return False
+        self.assign_lobby_terrain_authority_if_needed()
+        if not self.player_has_terrain_authority(player_id):
+            self.record_server_event("terrain rejected {} not authority".format(player_id or "?"))
+            return False
+
+        if action == "next":
+            target_index = self.environment_index + 1
+        elif action == "previous":
+            target_index = self.environment_index - 1
+        elif action == "set" and environment_index is not None:
+            if environment_index < 0 or environment_index >= len(ENVIRONMENTS):
+                self.record_server_event("terrain rejected {} invalid environment".format(player_id or "?"))
+                return False
+            target_index = environment_index
+        else:
+            self.record_server_event("terrain rejected {} bad command".format(player_id or "?"))
+            return False
+
+        self.apply_environment_index(
+            target_index,
+            actor="{} T{}".format(player_id, tank_id)
+        )
+        return True
+
     def format_uptime(self):
         elapsed = max(0, int(time.monotonic() - self.server_started_at))
         hours = elapsed // 3600
@@ -2508,6 +2708,7 @@ class MyApp(ShowBase):
                 "state": self.arena_state_label(),
                 "uptime": self.format_uptime(),
                 "environment": environment,
+                "terrain_authority": self.terrain_authority_label(),
                 "view": "PREVIEW" if self.waiting_to_start else "LIVE"
             },
             "network": {
@@ -2915,6 +3116,8 @@ class MyApp(ShowBase):
         return now >= self.tank_lifecycle_state(tank_id).get("hit_cooldown_until", 0)
 
     def tank_is_hittable(self, tank_id, now=None):
+        if getattr(self, "waiting_to_start", False):
+            return False
         if tank_id == "0" and self.game_over:
             return False
         if tank_id == "0" and self.is_network_server_authority() and not self.network_tank_client_connected("0"):
@@ -3053,6 +3256,19 @@ class MyApp(ShowBase):
         aim_world = render.getRelativePoint(self.tank_aim_mount_node(tank_id), self.tank_aim_point_local(tank_id))
         return self.normalize3(aim_world - shot_start)
 
+    def shot_direction_with_spread(self, direction, yaw_degrees, pitch_degrees):
+        direction = self.normalize3(direction)
+        yaw = math.tan(math.radians((random() - 0.5) * 2 * yaw_degrees))
+        pitch = math.tan(math.radians((random() - 0.5) * 2 * pitch_degrees))
+        world_up = Point3(0, 0, 1)
+        lateral = self.cross3(world_up, direction)
+        if self.dot3(lateral, lateral) < 0.0001:
+            lateral = Point3(1, 0, 0)
+        else:
+            lateral = self.normalize3(lateral)
+        vertical = self.normalize3(self.cross3(direction, lateral))
+        return self.normalize3(direction + lateral * yaw + vertical * pitch)
+
     def tank_collision_start(self, tank_id, shot_start, shot_direction):
         backtrace = self.tank_runtime_state(tank_id).get("collision_backtrace", 0)
         if backtrace <= 0:
@@ -3100,13 +3316,84 @@ class MyApp(ShowBase):
             return Point3(self.tank_shot_node("0").getPos(render))
         return Point3(self.tank_shot_node(tank_id).getPos(render))
 
-    def record_tank_shot_metadata(self, tank_id, shot_start, shot_end):
+    def coerce_trajectory_points(self, trajectory_points, shot_start=None, shot_end=None):
+        def as_point3(point):
+            try:
+                return Point3(point)
+            except TypeError:
+                return Point3(point[0], point[1], point[2])
+
+        points = []
+        if trajectory_points:
+            for point in trajectory_points:
+                if point is None:
+                    continue
+                points.append(as_point3(point))
+
+        if len(points) < 2:
+            points = []
+            if shot_start is not None:
+                points.append(as_point3(shot_start))
+            if shot_end is not None:
+                points.append(as_point3(shot_end))
+        return points
+
+    def record_tank_shot_metadata(self, tank_id, shot_start, shot_end, trajectory_points=None):
         if tank_id == "0":
             return
         tanks_dict[tank_id]["shot_start"] = Point3(shot_start)
         tanks_dict[tank_id]["shot_end"] = Point3(shot_end)
+        tanks_dict[tank_id]["shot_trajectory_points"] = self.coerce_trajectory_points(
+            trajectory_points,
+            shot_start,
+            shot_end
+        )
         tanks_dict[tank_id]["shot_shooter_pos"] = Point3(self.tank_body_node(tank_id).getPos(render))
         tanks_dict[tank_id]["shot_shooter_hpr"] = self.tank_body_node(tank_id).getHpr(render)
+
+    def shot_trajectory_for_hit(self, shooter_id, shot_start, shot_end):
+        trajectory_points = None
+        if shooter_id in tanks_list:
+            trajectory_points = tanks_dict[shooter_id].get("shot_trajectory_points")
+        points = self.coerce_trajectory_points(trajectory_points, shot_start, shot_end)
+        if len(points) > 2:
+            points[-1] = Point3(shot_end)
+        elif len(points) == 2:
+            points = [Point3(shot_start), Point3(shot_end)]
+        return points
+
+    def investigation_trajectory_points(self, event):
+        return self.coerce_trajectory_points(
+            event.get("trajectory_points"),
+            event.get("shot_start"),
+            event.get("shot_end")
+        )
+
+    def investigation_camera_target(self, event, camera_pos):
+        points = self.investigation_trajectory_points(event)
+        if len(points) < 2:
+            return None
+
+        shot_from = None
+        shot_to = None
+        for index in range(len(points) - 1, 0, -1):
+            candidate_from = Point3(points[index - 1])
+            candidate_to = Point3(points[index])
+            delta = candidate_to - candidate_from
+            if delta[0] * delta[0] + delta[1] * delta[1] > 0.001:
+                shot_from = candidate_from
+                shot_to = candidate_to
+                break
+
+        if shot_from is None:
+            return None
+
+        shot_delta = shot_to - shot_from
+        if self.dot3(shot_delta, shot_delta) < 0.001:
+            return None
+
+        shot_dir = self.normalize3(shot_delta)
+        return Point3(camera_pos + shot_dir * 40.0)
 
     def tank_ids_for_state(self):
         return ["0"] + sorted(tanks_list)
@@ -3173,6 +3460,9 @@ class MyApp(ShowBase):
             "shooter_id": str(event.get("shooter_id", "")),
             "shot_start": self.point_to_list(Point3(event.get("shot_start", Point3(0, 0, 0)))),
             "shot_end": self.point_to_list(Point3(event.get("shot_end", Point3(0, 0, 0)))),
+            "trajectory_points": [
+                self.point_to_list(point) for point in self.investigation_trajectory_points(event)
+            ],
             "shooter_pos": self.point_to_list(Point3(event.get("shooter_pos", Point3(0, 0, 0)))),
             "shooter_hpr": self.hpr_to_list(Point3(event.get("shooter_hpr", Point3(0, 0, 0)))),
             "player_pos": self.point_to_list(Point3(event.get("player_pos", Point3(0, 0, 0)))),
@@ -3190,10 +3480,17 @@ class MyApp(ShowBase):
         if remaining <= 0 and not fatal:
             return
 
+        shot_start = Point3(*event.get("shot_start", [0, 0, 0]))
+        shot_end = Point3(*event.get("shot_end", [0, 0, 0]))
+        trajectory_points = [
+            Point3(*point) for point in event.get("trajectory_points", [])
+        ]
+
         self.last_player_hit_event = {
             "shooter_id": str(event.get("shooter_id", "")),
-            "shot_start": Point3(*event.get("shot_start", [0, 0, 0])),
-            "shot_end": Point3(*event.get("shot_end", [0, 0, 0])),
+            "shot_start": shot_start,
+            "shot_end": shot_end,
+            "trajectory_points": self.coerce_trajectory_points(trajectory_points, shot_start, shot_end),
             "shooter_pos": Point3(*event.get("shooter_pos", [0, 0, 0])),
             "shooter_hpr": Point3(*event.get("shooter_hpr", [0, 0, 0])),
             "player_pos": Point3(*event.get("player_pos", [0, 0, 0])),
@@ -3215,6 +3512,9 @@ class MyApp(ShowBase):
             "waiting_to_start": self.waiting_to_start,
             "game_over": self.game_over,
             "enemy_shooting_suspended": self.enemy_shooting_suspended,
+            "terrain_authority_player_id": self.terrain_authority_player_id,
+            "terrain_authority_tank_id": self.terrain_authority_tank_id,
+            "terrain_locked": self.terrain_selection_locked(),
             "player_lives": self.player_lives,
             "player_damage_event_serial": self.player_damage_event_serial,
             "player_hit_effect_serial": self.player_hit_effect_serial,
@@ -3223,6 +3523,8 @@ class MyApp(ShowBase):
             "player_investigation_event": self.network_player_investigation_event(),
             "tank_hit_event_serial": self.tank_hit_event_serial,
             "tank_hit_event": self.last_tank_hit_event,
+            "shot_ground_burst_serial": self.shot_ground_burst_serial,
+            "shot_ground_burst_event": self.last_shot_ground_burst_event,
             "connected_tanks": self.network_connected_tank_ids(),
             "claimable_tanks": self.network_claimable_tank_ids(),
             "claims": self.network_claim_metadata_snapshot(),
@@ -3259,6 +3561,9 @@ class MyApp(ShowBase):
         self.network_claimable_tanks = snapshot.get("claimable_tanks", self.network_claimable_tanks)
         self.network_claim_metadata = snapshot.get("claims", {})
         self.network_server_status = snapshot.get("server_status", {})
+        self.network_terrain_authority_player_id = str(snapshot.get("terrain_authority_player_id", ""))
+        self.network_terrain_authority_tank_id = str(snapshot.get("terrain_authority_tank_id", ""))
+        self.network_terrain_locked = bool(snapshot.get("terrain_locked", False))
         self.player_lives = int(snapshot.get("player_lives", self.player_lives))
         for tank_id, tank_state in snapshot.get("tanks", {}).items():
             if tank_id in self.tank_lifecycle and tank_state.get("lives") is not None:
@@ -3271,6 +3576,14 @@ class MyApp(ShowBase):
         self.network_tank_hit_event_serial = max(self.network_tank_hit_event_serial, tank_hit_serial)
         if not self.investigation_mode:
             self.update_network_snapshot_shot_audio(snapshot.get("shots", {}))
+
+        shot_ground_burst_serial = int(snapshot.get("shot_ground_burst_serial", 0))
+        if (
+                not first_snapshot and
+                not self.investigation_mode and
+                shot_ground_burst_serial > self.network_shot_ground_burst_serial):
+            self.play_shot_ground_burst_event(snapshot.get("shot_ground_burst_event", {}))
+        self.network_shot_ground_burst_serial = max(self.network_shot_ground_burst_serial, shot_ground_burst_serial)
 
         player_damage_serial = int(snapshot.get("player_damage_event_serial", 0))
         if (
@@ -3324,22 +3637,31 @@ class MyApp(ShowBase):
         else:
             self.gameOverTextObject.hide()
 
+    def network_client_terrain_authority_label(self):
+        if self.network_terrain_locked:
+            return "LOCKED"
+        if not self.network_terrain_authority_player_id:
+            return "SERVER"
+        if self.network_terrain_authority_player_id == self.network_player_id:
+            return "YOU"
+        return self.network_terrain_authority_player_id
+
     def update_network_client_start_prompt(self):
         if not self.is_network_client_controller():
             return
         if not hasattr(self, "startTextObject"):
             return
         if self.waiting_to_start:
-            if self.network_join_accepted:
-                self.startTextObject.text = "TANK CLIENT\nTANK {}\nENTER TO START".format(NETWORK_TANK_ID)
-            else:
-                self.startTextObject.text = "TANK CLIENT\nTANK {}\n{}".format(
-                    NETWORK_TANK_ID,
-                    self.network_client_mode_label()
-                )
-            self.startTextObject.show()
+            self.startTextObject.hide()
+            for text_object in getattr(self, "environmentNameTextObjects", []):
+                text_object.hide()
+            if hasattr(self, "environmentTextObject"):
+                self.environmentTextObject.hide()
+            self.update_client_lobby_panel()
+            self.set_client_lobby_visible(True)
         else:
             self.startTextObject.hide()
+            self.set_client_lobby_visible(False)
 
     def update_network_snapshot_shot_audio(self, shot_states):
         if self.waiting_to_start:
@@ -3610,17 +3932,30 @@ class MyApp(ShowBase):
             self.snap_network_snapshot_render()
         print("Network smoothing {}".format("ON" if self.network_interpolation_enabled else "OFF"))
 
-    def arm_investigation(self, shooter_id, shot_start, shot_end, shooter_pos=None, shooter_hpr=None):
+    def arm_investigation(
+            self,
+            shooter_id,
+            shot_start,
+            shot_end,
+            shooter_pos=None,
+            shooter_hpr=None,
+            trajectory_points=None):
         if shooter_id in tanks_list:
             if shooter_pos is None:
                 shooter_pos = tanks_dict[shooter_id]["tank"].getPos(render)
             if shooter_hpr is None:
                 shooter_hpr = tanks_dict[shooter_id]["tank"].getHpr(render)
 
+        trajectory_points = self.coerce_trajectory_points(
+            trajectory_points,
+            shot_start,
+            shot_end
+        )
         self.last_player_hit_event = {
             "shooter_id": shooter_id,
             "shot_start": Point3(shot_start),
             "shot_end": Point3(shot_end),
+            "trajectory_points": trajectory_points,
             "shooter_pos": Point3(shooter_pos),
             "shooter_hpr": shooter_hpr,
             "player_pos": self.tank_body_pos("0"),
@@ -3630,6 +3965,25 @@ class MyApp(ShowBase):
         self.investigation_available_until = (
             ClockObject.getGlobalClock().getFrameTime() + INVESTIGATE_WINDOW_SECONDS
         )
+
+    def attach_investigation_cross_marker(self, name, pos, color, radius=0.9):
+        marker = LineSegs(name)
+        marker.setThickness(3)
+        marker.setColor(*color)
+        marker.moveTo(-radius, 0, 0)
+        marker.drawTo(radius, 0, 0)
+        marker.moveTo(0, -radius, 0)
+        marker.drawTo(0, radius, 0)
+        marker.moveTo(0, 0, -radius * 0.35)
+        marker.drawTo(0, 0, radius * 0.9)
+        marker_np = self.investigation_marker_root.attachNewNode(marker.create())
+        marker_np.setPos(render, Point3(pos))
+        marker_np.setTransparency(TransparencyAttrib.MAlpha, 10)
+        marker_np.setAttrib(ColorBlendAttrib.make(ColorBlendAttrib.MAdd), 10)
+        marker_np.setDepthWrite(False, 10)
+        marker_np.setColorScale(color[0], color[1], color[2], color[3], 10)
+        marker_np.showThrough()
+        return marker_np
 
     def make_investigation_persistent_for_game_over(self):
         if self.last_player_hit_event:
@@ -3697,17 +4051,35 @@ class MyApp(ShowBase):
             return
 
         self.investigation_marker_root = render.attachNewNode("InvestigationMarkers")
+        trajectory_points = self.investigation_trajectory_points(event)
         trajectory = LineSegs("InvestigationTrajectory")
         trajectory.setThickness(5)
         trajectory.setColor(1.0, 0.05, 0.02, 1)
-        trajectory.moveTo(event["shot_start"])
-        trajectory.drawTo(event["shot_end"])
+        if trajectory_points:
+            trajectory.moveTo(trajectory_points[0])
+            for point in trajectory_points[1:]:
+                trajectory.drawTo(point)
         trajectory_np = self.investigation_marker_root.attachNewNode(trajectory.create())
         trajectory_np.setTransparency(TransparencyAttrib.MAlpha, 10)
         trajectory_np.setAttrib(ColorBlendAttrib.make(ColorBlendAttrib.MAdd), 10)
         trajectory_np.setDepthWrite(False, 10)
         trajectory_np.setColorScale(1.0, 0.03, 0.02, 1, 10)
         trajectory_np.showThrough()
+
+        for bounce_point in trajectory_points[1:-1]:
+            self.attach_investigation_cross_marker(
+                "InvestigationBounce",
+                bounce_point,
+                (1.0, 0.68, 0.02, 1.0),
+                0.75
+            )
+        if trajectory_points:
+            self.attach_investigation_cross_marker(
+                "InvestigationImpact",
+                trajectory_points[-1],
+                (1.0, 0.03, 0.02, 1.0),
+                0.55
+            )
 
         shooter_id = event["shooter_id"]
         if shooter_id in tanks_list:
@@ -3739,12 +4111,11 @@ class MyApp(ShowBase):
             return Point3(self.camera.getPos(render))
 
         event = self.last_player_hit_event
-        points = [
-            Point3(event["shot_start"]),
-            Point3(event["shot_end"]),
+        points = self.investigation_trajectory_points(event)
+        points.extend([
             Point3(event["player_pos"]),
             Point3(event["shooter_pos"]),
-        ]
+        ])
         center = Point3(0, 0, 3.0)
         for point in points:
             center[0] += point[0]
@@ -3809,15 +4180,16 @@ class MyApp(ShowBase):
         if not event:
             return
 
-        shot_start = Point3(event["shot_start"])
-        shot_end = Point3(event["shot_end"])
         player_pos = Point3(event["player_pos"])
         shooter_pos = Point3(event["shooter_pos"])
-        focus_point = Point3(
-            (shot_start[0] + shot_end[0] + player_pos[0] + shooter_pos[0]) * 0.25,
-            (shot_start[1] + shot_end[1] + player_pos[1] + shooter_pos[1]) * 0.25,
-            0.35
-        )
+        focus_points = self.investigation_trajectory_points(event)
+        focus_points.extend([player_pos, shooter_pos])
+        focus_point = Point3(0, 0, 0.35)
+        for point in focus_points:
+            focus_point[0] += point[0]
+            focus_point[1] += point[1]
+        focus_point[0] /= len(focus_points)
+        focus_point[1] /= len(focus_points)
         orbit_angle = math.radians(self.investigation_drone_elapsed * INVESTIGATION_DRONE_ORBIT_SPEED)
         orbit_radius = INVESTIGATION_DRONE_ORBIT_RADIUS * (0.92 + 0.08 * math.sin(self.investigation_drone_elapsed * 0.37))
         orbit_x = math.sin(orbit_angle)
@@ -3867,7 +4239,12 @@ class MyApp(ShowBase):
         ghost_pos = Point3(self.last_player_hit_event["player_pos"])
         ghost_pos[2] = INVESTIGATION_GHOST_HEIGHT
         self.camera.setPos(render, ghost_pos)
-        self.camera.setHpr(render, self.last_player_hit_event["player_hpr"])
+        shot_target = self.investigation_camera_target(self.last_player_hit_event, ghost_pos)
+        if shot_target is not None:
+            self.camera.lookAt(render, shot_target)
+            self.camera.setR(render, 0)
+        else:
+            self.camera.setHpr(render, self.last_player_hit_event["player_hpr"])
         self.pause_simulation_intervals()
         self.clear_live_hit_effects_for_investigation()
         self.render_investigation_markers()
@@ -3946,7 +4323,8 @@ class MyApp(ShowBase):
             shot_start,
             shot_end,
             tanks_dict[shooter_id].get("shot_shooter_pos"),
-            tanks_dict[shooter_id].get("shot_shooter_hpr")
+            tanks_dict[shooter_id].get("shot_shooter_hpr"),
+            self.shot_trajectory_for_hit(shooter_id, shot_start, shot_end)
         )
         self.enemy_reset_shot(shooter_id)
         self.last_player_hit_time = now
@@ -3965,7 +4343,7 @@ class MyApp(ShowBase):
             self.make_investigation_persistent_for_game_over()
             self.end_game()
 
-    def register_incoming_player_tank_hit(self, shooter_id, shot_start, shot_end):
+    def register_incoming_player_tank_hit(self, shooter_id, shot_start, shot_end, trajectory_points=None):
         now = ClockObject.getGlobalClock().getFrameTime()
         if self.investigation_mode or not self.player_tank_is_hittable() or now - self.last_player_hit_time < PLAYER_HIT_COOLDOWN:
             return
@@ -3985,7 +4363,8 @@ class MyApp(ShowBase):
             Point3(shot_start),
             shot_end,
             tanks_dict[shooter_id].get("shot_shooter_pos"),
-            tanks_dict[shooter_id].get("shot_shooter_hpr")
+            tanks_dict[shooter_id].get("shot_shooter_hpr"),
+            trajectory_points
         )
 
         self.last_player_hit_time = now
@@ -4174,7 +4553,7 @@ class MyApp(ShowBase):
         self.set_tank_alive("0", True)
         self.set_tank_reconstituting("0", False)
         self.set_tank_lives("0", self.tank_max_lives("0"))
-        self.set_tank_hit_cooldown("0", 0)
+        self.set_tank_hit_cooldown("0", PLAYER_RESTART_GRACE_SECONDS)
         self.player_barrel_tilt = 0.0
         self.reset_tank_shot("0")
         for t in tanks_list:
@@ -4184,6 +4563,7 @@ class MyApp(ShowBase):
             self.set_tank_lives(t, self.tank_max_lives(t))
             self.set_tank_hit_cooldown(t, 0)
             self.enemy_reset_shot(t)
+            self.reset_ai_tank_controller_for_match(t)
         self.startTextObject.hide()
         for text_object in getattr(self, "environmentNameTextObjects", []):
             text_object.hide()
@@ -4230,7 +4610,8 @@ class MyApp(ShowBase):
         self.set_auxiliary_views_visible(not server_authority and ((not waiting and not client_controller) or client_snapshot) and not client_low_render)
         self.set_drone_view_visible(not server_authority and not waiting and not client_controller and not client_low_render)
         self.set_recon_drone_world_visible(not server_authority and not client_low_render)
-        self.set_environment_preview_visible(waiting and not client_controller and not server_authority)
+        self.set_environment_preview_visible(waiting and not server_authority)
+        self.set_client_lobby_visible(waiting and client_controller)
         self.set_server_lobby_visible(waiting and self.server_panda_overlay_enabled())
 
     def set_auxiliary_views_visible(self, visible):
@@ -4286,6 +4667,100 @@ class MyApp(ShowBase):
                 node.show()
             else:
                 node.hide()
+
+    def set_client_lobby_visible(self, visible):
+        if not hasattr(self, "clientLobbyRoot"):
+            return
+        if visible:
+            self.clientLobbyRoot.show()
+        else:
+            self.clientLobbyRoot.hide()
+
+    def update_client_lobby_panel(self):
+        if not hasattr(self, "clientLobbyTitleObject"):
+            return
+
+        authority = self.network_client_terrain_authority_label()
+        link_state = self.network_client_mode_label()
+        if self.network_join_accepted:
+            link_state = "CONNECTED"
+        elif self.network_join_rejected_reason:
+            link_state = "REJECTED"
+
+        terrain_control = "ENABLED" if authority == "YOU" else "VIEW ONLY"
+        start_state = "READY" if self.network_join_accepted else "WAITING"
+        server = "{}:{}".format(NETWORK_HOST, NETWORK_PORT)
+
+        self.clientLobbyTitleObject.text = "BATTLEZONE ARENA"
+        self.clientLobbyStatusObject.text = "LOBBY"
+        self.clientLobbyRows["tank"].text = "TANK        {}".format(NETWORK_TANK_ID)
+        self.clientLobbyRows["link"].text = "LINK        {}".format(link_state)
+        self.clientLobbyRows["server"].text = "SERVER      {}".format(server)
+        self.clientLobbyRows["terrain"].text = "TERRAIN     {}".format(self.selected_environment()["name"])
+        self.clientLobbyRows["authority"].text = "AUTHORITY   {}".format(authority)
+        self.clientLobbyRows["control"].text = "TERRAIN     {}".format(terrain_control)
+        self.clientLobbyRows["start"].text = "START       {}".format(start_state)
+
+        authority_color = (0.48, 1.0, 0.48, 1) if authority == "YOU" else (0.18, 0.72, 0.28, 1)
+        self.clientLobbyRows["authority"].setFg(authority_color)
+        self.clientLobbyRows["control"].setFg(authority_color)
+
+    def render_client_lobby_panel(self):
+        self.clientLobbyRoot = aspect2d.attachNewNode("ClientLobbyPanel")
+        self.clientLobbyRoot.setPos(-1.24, 0, 0.58)
+
+        panel = CardMaker("client-lobby-panel")
+        panel.setFrame(0, 0.92, -0.62, 0.12)
+        panel_np = self.clientLobbyRoot.attachNewNode(panel.generate())
+        panel_np.setTransparency(TransparencyAttrib.MAlpha)
+        panel_np.setColorScale(0.0, 0.045, 0.015, 0.82)
+        panel_np.setBin("fixed", 2)
+
+        frame = LineSegs("client-lobby-frame")
+        frame.setThickness(2)
+        frame.moveTo(0, 0, -0.62)
+        frame.drawTo(0.92, 0, -0.62)
+        frame.drawTo(0.92, 0, 0.12)
+        frame.drawTo(0, 0, 0.12)
+        frame.drawTo(0, 0, -0.62)
+        frame_np = self.clientLobbyRoot.attachNewNode(frame.create())
+        frame_np.setColorScale(0.08, 0.82, 0.18, 1)
+
+        self.clientLobbyTitleObject = OnscreenText(
+            text="BATTLEZONE ARENA",
+            pos=(0.05, 0.045),
+            align=TextNode.ALeft,
+            scale=(0.038, 0.055),
+            fg=(0.55, 1.0, 0.55, 1),
+            mayChange=True
+        )
+        self.clientLobbyTitleObject.reparentTo(self.clientLobbyRoot)
+
+        self.clientLobbyStatusObject = OnscreenText(
+            text="LOBBY",
+            pos=(0.86, 0.045),
+            align=TextNode.ARight,
+            scale=(0.031, 0.046),
+            fg=(0.28, 0.9, 0.34, 1),
+            mayChange=True
+        )
+        self.clientLobbyStatusObject.reparentTo(self.clientLobbyRoot)
+
+        self.clientLobbyRows = {}
+        rows = ("tank", "link", "server", "terrain", "authority", "control", "start")
+        for index, row_name in enumerate(rows):
+            text_obj = OnscreenText(
+                text="",
+                pos=(0.05, -0.07 - index * 0.075),
+                align=TextNode.ALeft,
+                scale=(0.029, 0.043),
+                fg=(0.34, 0.96, 0.38, 1),
+                mayChange=True
+            )
+            text_obj.reparentTo(self.clientLobbyRoot)
+            self.clientLobbyRows[row_name] = text_obj
+
+        self.clientLobbyRoot.hide()
 
     def selected_environment(self):
         return ENVIRONMENTS[self.environment_index]
@@ -4365,10 +4840,7 @@ class MyApp(ShowBase):
             environment["description"]
         )
 
-    def set_environment_index(self, index):
-        if not self.waiting_to_start:
-            return
-
+    def apply_environment_index(self, index, actor=None):
         self.environment_index = index % len(ENVIRONMENTS)
         self.active_obstacles = self.selected_environment()["obstacles"]
         self.render_grid()
@@ -4377,15 +4849,97 @@ class MyApp(ShowBase):
         self.update_environment_hud()
         self.position_start_camera()
         self.update_start_screen_presentation()
+        if actor is not None and self.is_network_server_authority():
+            self.record_server_event("terrain set {} by {}".format(self.selected_environment()["name"], actor))
+
+    def set_environment_index(self, index):
+        if not self.waiting_to_start:
+            return
+
+        if self.is_network_client_controller():
+            if self.network_bridge is not None:
+                self.network_bridge.send_client_terrain("set", index)
+            return
+
+        actor = "SERVER" if self.is_network_server_authority() else None
+        self.apply_environment_index(index, actor=actor)
 
     def next_environment(self):
+        if self.is_network_client_controller():
+            if self.waiting_to_start and self.network_bridge is not None:
+                self.network_bridge.send_client_terrain("next")
+            return
         self.set_environment_index(self.environment_index + 1)
 
     def previous_environment(self):
+        if self.is_network_client_controller():
+            if self.waiting_to_start and self.network_bridge is not None:
+                self.network_bridge.send_client_terrain("previous")
+            return
         self.set_environment_index(self.environment_index - 1)
 
     def cycle_environment(self):
         self.next_environment()
+
+    def return_to_lobby_after_game_over(self, reason=""):
+        if self.is_network_client_controller() or not self.game_over:
+            return
+
+        if self.investigation_mode:
+            self.exit_investigation()
+        else:
+            self.clear_investigation_markers()
+            self.last_player_hit_event = None
+            self.investigateTextObject.hide()
+            self.investigateTimerRoot.hide()
+
+        self.game_over = False
+        self.waiting_to_start = True
+        self.terrain_authority_player_id = ""
+        self.terrain_authority_tank_id = ""
+        if self.is_network_server_authority():
+            detail = "" if not reason else " ({})".format(reason)
+            self.record_server_event("arena returned to lobby{}".format(detail))
+
+        self.last_player_hit_time = -PLAYER_HIT_COOLDOWN
+        self.reset_incoming_player_hit_consumption()
+        self.set_tank_alive("0", True)
+        self.set_tank_reconstituting("0", False)
+        self.set_tank_lives("0", self.tank_max_lives("0"))
+        self.set_tank_hit_cooldown("0", 0)
+        self.hit_flash_alpha = 0
+        self.player_hit_shake_until = 0
+        self.player_hit_shake_started_at = 0
+        self.player_tank_visual_hidden_for_effect = False
+        self.hitFlashNp.hide()
+        self.gameOverTextObject.hide()
+        self.investigation_snd.stop()
+        self.gameOver_snd.stop()
+        self.ambient_snd.stop()
+        self.position_start_camera()
+        self.player_tank_visual.show()
+        self.update_player_tank_visual()
+        self.player_barrel_tilt = 0.0
+        self.reset_shot()
+
+        for t in tanks_list:
+            tanks_dict[t]["barrel_tilt"] = 0.0
+            tanks_dict[t]["move"] = True
+            tanks_dict[t]["shooting"] = False
+            tanks_dict[t]["tank"].show()
+            tanks_dict[t]["frags"].hide()
+            tanks_dict[t].pop("last_pos", None)
+            tanks_dict[t]["attack_ready_time"] = 0
+            self.set_tank_alive(t, True)
+            self.set_tank_reconstituting(t, False)
+            self.set_tank_lives(t, self.tank_max_lives(t))
+            self.set_tank_hit_cooldown(t, 0)
+            self.enemy_reset_shot(t)
+
+        self.update_lives_hud()
+        self.update_environment_hud()
+        self.assign_lobby_terrain_authority_if_needed()
+        self.update_start_screen_presentation()
 
     def restart_game(self):
         if self.is_network_client_controller():
@@ -4412,12 +4966,10 @@ class MyApp(ShowBase):
         self.set_tank_alive("0", True)
         self.set_tank_reconstituting("0", False)
         self.set_tank_lives("0", self.tank_max_lives("0"))
-        self.set_tank_hit_cooldown("0", 0)
+        self.set_tank_hit_cooldown("0", PLAYER_RESTART_GRACE_SECONDS)
         self.hit_flash_alpha = 0
         self.player_hit_shake_until = 0
         self.player_hit_shake_started_at = 0
-        self.player_damage_event_serial = 0
-        self.network_player_damage_event_serial = 0
         self.player_tank_visual_hidden_for_effect = False
         self.gameOverTextObject.hide()
         self.startTextObject.hide()
@@ -4445,12 +4997,12 @@ class MyApp(ShowBase):
             tanks_dict[t]["tank"].show()
             tanks_dict[t]["frags"].hide()
             tanks_dict[t].pop("last_pos", None)
-            tanks_dict[t]["attack_ready_time"] = 0
             self.set_tank_alive(t, True)
             self.set_tank_reconstituting(t, False)
             self.set_tank_lives(t, self.tank_max_lives(t))
             self.set_tank_hit_cooldown(t, 0)
             self.enemy_reset_shot(t)
+            self.reset_ai_tank_controller_for_match(t)
         self.update_lives_hud()
 
     def updatePlayerFeedbackTask(self, task):
@@ -4866,6 +5418,7 @@ class MyApp(ShowBase):
                                             align=TextNode.ACenter, scale=(0.075, 0.1),
                                             fg=(0.4, 1.0, 0.4, 1), mayChange=True)
         self.startTextObject.reparentTo(aspect2d)
+        self.render_client_lobby_panel()
         self.render_server_lobby_overlay()
 
         self.environmentNameTextObjects = []
@@ -5777,7 +6330,9 @@ class MyApp(ShowBase):
             self.set_tank_alive(t, True)
             self.set_tank_reconstituting(t, False)
             self.set_tank_hit_cooldown(t, PLAYER_HIT_COOLDOWN)
-            self.set_tank_attack_cooldown(t, TANK_RESPAWN_ATTACK_COOLDOWN)
+            controller = getattr(self, "ai_tank_controllers", {}).get(t)
+            respawn_delay = getattr(controller, "respawn_attack_delay", TANK_RESPAWN_ATTACK_COOLDOWN)
+            self.set_tank_attack_cooldown(t, respawn_delay)
 
     def set_tank_attack_cooldown(self, t, seconds):
         ready_time = ClockObject.getGlobalClock().getFrameTime() + seconds
@@ -5791,6 +6346,12 @@ class MyApp(ShowBase):
 
     def tank_attack_ready(self, t, task_time):
         return task_time >= tanks_dict[t].get("attack_ready_time", 0)
+
+    def reset_ai_tank_controller_for_match(self, t):
+        controller = getattr(self, "ai_tank_controllers", {}).get(t)
+        if controller is not None and hasattr(controller, "reset_for_match"):
+            controller.reset_for_match(ClockObject.getGlobalClock().getFrameTime())
+            tanks_dict[t]["attack_ready_time"] = getattr(controller, "next_fire_time", 0)
 
     def set_tank_on_terrain(self, t, world_pos, heading=None):
         if heading is None:
@@ -6073,6 +6634,9 @@ class MyApp(ShowBase):
         return None
 
     def play_shot_ground_burst(self, impact):
+        if self.investigation_mode:
+            return
+
         burst_lines = LineSegs("shot-ground-burst")
         burst_lines.setThickness(2)
         burst_radius = SHOT_GROUND_BURST_RADIUS
@@ -6099,6 +6663,24 @@ class MyApp(ShowBase):
                 LerpColorScaleInterval(burst_np, SHOT_GROUND_BURST_SECONDS, (0.0, 0.9, 0.1, 0.0))
             ),
             Func(burst_np.removeNode)
+        ).start()
+
+    def record_shot_ground_burst(self, impact):
+        impact = Point3(impact)
+        self.shot_ground_burst_serial += 1
+        self.last_shot_ground_burst_event = {
+            "serial": self.shot_ground_burst_serial,
+            "pos": self.point_to_list(impact)
+        }
+        self.play_shot_ground_burst(impact)
+
+    def play_shot_ground_burst_event(self, event):
+        if not event:
+            return
+        pos = Point3(*event.get("pos", [0, 0, 0]))
+        Sequence(
+            Wait(NETWORK_EFFECT_DELAY),
+            Func(self.play_shot_ground_burst, pos)
         ).start()
 
     def register_player_tank_hit(self, tank_id, shooter_id="0", shot_start=None, shot_end=None):
@@ -6217,13 +6799,14 @@ class MyApp(ShowBase):
             hit_distance = collision_distance * tank_hit["t"]
             visible_distance_to_impact = max(0, hit_distance - visible_offset)
             impact = tank_hit["point"]
+            trajectory_points = [Point3(start), Point3(impact)]
             first_duration = max(0.03, duration * min(1, visible_distance_to_impact / distance))
             interval = Sequence(
                 LerpPosInterval(round_np, first_duration, pos=impact),
                 Func(self.register_player_tank_hit, tank_hit["tank_id"], shooter_id, start, impact)
             )
             interval.setDoneEvent(done_event)
-            return interval, impact, False
+            return interval, impact, False, trajectory_points
 
         if (
                 incoming_player_hit and
@@ -6232,32 +6815,34 @@ class MyApp(ShowBase):
             hit_distance = collision_distance * incoming_player_hit["t"]
             visible_distance_to_impact = max(0, hit_distance - visible_offset)
             impact = incoming_player_hit["point"]
+            trajectory_points = [Point3(start), Point3(impact)]
             first_duration = max(0.03, duration * min(1, visible_distance_to_impact / distance))
             interval = Sequence(
                 LerpPosInterval(round_np, first_duration, pos=impact),
-                Func(self.register_incoming_player_tank_hit, shooter_id, start, impact)
+                Func(self.register_incoming_player_tank_hit, shooter_id, start, impact, trajectory_points)
             )
             interval.setDoneEvent(done_event)
-            return interval, impact, False
+            return interval, impact, False, trajectory_points
 
         if ground_hit and (not hit or ground_hit["t"] < hit["t"]):
             hit_distance = collision_distance * ground_hit["t"]
             visible_distance_to_impact = max(0, hit_distance - visible_offset)
             impact = ground_hit["point"]
+            trajectory_points = [Point3(start), Point3(impact)]
             first_duration = max(0.03, duration * min(1, visible_distance_to_impact / distance))
             interval = Sequence(
                 LerpPosInterval(round_np, first_duration, pos=impact),
-                Func(self.play_shot_ground_burst, impact),
+                Func(self.record_shot_ground_burst, impact),
                 Func(round_np.hide),
                 Wait(SHOT_GROUND_BURST_SECONDS)
             )
             interval.setDoneEvent(done_event)
-            return interval, impact, False
+            return interval, impact, False, trajectory_points
 
         if not hit:
             interval = LerpPosInterval(round_np, duration, pos=raw_end)
             interval.setDoneEvent(done_event)
-            return interval, raw_end, False
+            return interval, raw_end, False, [Point3(start), Point3(raw_end)]
 
         impact = hit["point"]
         hit_distance = collision_distance * hit["t"]
@@ -6272,6 +6857,7 @@ class MyApp(ShowBase):
         remaining_distance = max(0, collision_distance - hit_distance)
         reflected_start = Point3(impact + reflected_dir * SHOT_DEFLECTION_CLEARANCE)
         reflected_end = Point3(reflected_start + reflected_dir * remaining_distance)
+        trajectory_points = [Point3(start), Point3(impact), Point3(reflected_end)]
 
         if visible_distance_to_impact <= SHOT_DEFLECTION_CLEARANCE:
             round_np.setPos(render, impact)
@@ -6284,7 +6870,7 @@ class MyApp(ShowBase):
                 LerpPosInterval(round_np, second_duration, pos=reflected_end)
             )
         interval.setDoneEvent(done_event)
-        return interval, reflected_end, True
+        return interval, reflected_end, True, trajectory_points
 
     def normalized_xy(self, vector):
         length = math.sqrt(vector[0] ** 2 + vector[1] ** 2)
@@ -6575,16 +7161,16 @@ class MyApp(ShowBase):
         shot_np.show()
         return Point3(shot_np.getPos(render))
 
-    def complete_tank_shot_start(self, tank_id, shot_start, interval, shot_end, shot_deflected):
+    def complete_tank_shot_start(self, tank_id, shot_start, interval, shot_end, shot_deflected, trajectory_points=None):
         self.set_tank_shot_interval(tank_id, interval)
         self.set_tank_shot_deflected(tank_id, shot_deflected)
-        self.record_tank_shot_metadata(tank_id, shot_start, shot_end)
+        self.record_tank_shot_metadata(tank_id, shot_start, shot_end, trajectory_points)
         interval.start()
 
     def fire_tank_shot(self, tank_id, direction, distance, duration, sound, collision_start=None, shot_start=None):
         if shot_start is None:
             shot_start = self.prepare_tank_shot(tank_id)
-        interval, shot_end, shot_deflected = self.create_shot_interval(
+        interval, shot_end, shot_deflected, trajectory_points = self.create_shot_interval(
             self.tank_shot_node(tank_id),
             shot_start,
             direction,
@@ -6594,11 +7180,11 @@ class MyApp(ShowBase):
             collision_start,
             shooter_id=tank_id
         )
-        self.complete_tank_shot_start(tank_id, shot_start, interval, shot_end, shot_deflected)
+        self.complete_tank_shot_start(tank_id, shot_start, interval, shot_end, shot_deflected, trajectory_points)
         sound.play()
         return shot_end
 
-    def fire_tank(self, tank_id, sound=None, direction=None, shot_start=None):
+    def fire_tank(self, tank_id, sound=None, direction=None, shot_start=None, apply_spread=False):
         if not self.tank_can_run_controller(tank_id):
             return None
 
@@ -6606,6 +7192,12 @@ class MyApp(ShowBase):
         if shot_start is None:
             shot_start = self.prepare_tank_shot(tank_id)
         shot_direction = direction if direction is not None else self.tank_shot_direction(tank_id, shot_start)
+        if apply_spread:
+            shot_direction = self.shot_direction_with_spread(
+                shot_direction,
+                AI_SHOT_SPREAD_YAW_DEGREES,
+                AI_SHOT_SPREAD_PITCH_DEGREES
+            )
         collision_start = self.tank_collision_start(tank_id, shot_start, shot_direction)
         if sound is None:
             sound = self.mainShot_snd if runtime.get("is_player", False) else self.enemyShot_snd
@@ -6624,7 +7216,7 @@ class MyApp(ShowBase):
         return shot_end
 
     def fire_enemy_tank(self, t):
-        self.fire_tank(t, self.enemyShot_snd)
+        self.fire_tank(t, self.enemyShot_snd, apply_spread=True)
 
     def fire_remote_tank(self, t):
         self.fire_tank(t, self.mainShot_snd)
@@ -6637,6 +7229,8 @@ class MyApp(ShowBase):
             self.set_tank_shot_interval(tank_id, None)
 
         self.set_tank_shot_deflected(tank_id, False)
+        if tank_id in tanks_list:
+            tanks_dict[tank_id]["shot_trajectory_points"] = []
         shot_np = self.tank_shot_node(tank_id)
         shot_np.reparentTo(self.tank_shot_mount_node(tank_id))
         shot_np.setPos(self.tank_shot_stowed_local(tank_id))
