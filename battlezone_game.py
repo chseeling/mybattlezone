@@ -5565,7 +5565,7 @@ class MyApp(ShowBase):
             return self.network_current_tank_id()
         if self.is_network_server_authority():
             return None
-        return self.human_control_tank_id
+        return getattr(self, "human_control_tank_id", "0")
 
     def tank_has_human_controller(self, tank_id, claims=None):
         tank_id = str(tank_id)
