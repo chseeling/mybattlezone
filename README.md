@@ -19,7 +19,7 @@ python -m venv .venv
 
 ```
 cd mybattlezone
-python test02.py
+python battlezone_game.py
 ```
 
 Or from PowerShell on Windows:
@@ -44,7 +44,7 @@ battlezone.runtime             runtime importer
 battlezone.server              authoritative LAN server entrypoint
 ```
 
-`test02.py` remains the legacy game engine entrypoint while the runtime is split into cleaner client/server launch paths.
+`battlezone_game.py` is the Panda3D game engine entrypoint while the runtime is split into cleaner client/server launch paths.
 
 See [docs/lan_deployment.md](docs/lan_deployment.md) for LAN setup, Raspberry Pi commands, Docker notes, and casual-client packaging.
 
@@ -132,7 +132,7 @@ play_client.ps1
 play_client.sh
 start_client.ps1
 start_client.sh
-test02.py
+battlezone_game.py
 requirements.txt
 config/
 models/
@@ -234,5 +234,5 @@ To show collision debug output:
 
 ```
 $env:BATTLEZONE_DEBUG = "1"
-python test02.py
+python battlezone_game.py
 ```

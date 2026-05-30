@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-GAME_ENTRYPOINT = PROJECT_ROOT / "test02.py"
+GAME_ENTRYPOINT = PROJECT_ROOT / "battlezone_game.py"
 
 
 def merged_env(overrides=None):

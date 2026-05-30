@@ -10,7 +10,7 @@ from battlezone.config import DEFAULT_CLIENT_CONTROLLER, DEFAULT_CLIENT_TANK_ID,
 
 APP_DIR = Path(__file__).resolve().parent.parent
 CONFIG_PATH = APP_DIR / "client_config.json"
-GAME_PATH = APP_DIR / "test02.py"
+GAME_PATH = APP_DIR / "battlezone_game.py"
 
 DEFAULT_CONFIG = {
     "server_host": DEFAULT_NETWORK_HOST,
@@ -68,7 +68,7 @@ def validate_config(config):
         errors.append("Controller must be human or autonomous.")
 
     if not GAME_PATH.exists():
-        errors.append("Could not find test02.py beside the launcher.")
+        errors.append("Could not find battlezone_game.py beside the launcher.")
 
     return errors
 

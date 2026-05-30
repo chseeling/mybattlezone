@@ -1,6 +1,6 @@
 # LAN Deployment Guide
 
-This project now has package entrypoints for deployment while `test02.py` remains the Panda3D game runtime.
+This project now has package entrypoints for deployment while `battlezone_game.py` remains the Panda3D game runtime.
 
 ## Code Layout
 
@@ -15,7 +15,7 @@ battlezone/
   protocol.py            wire protocol constants
   runtime.py             imports and runs the game runtime
   server.py              authoritative LAN server entrypoint
-test02.py                current Panda3D game runtime
+battlezone_game.py       current Panda3D game runtime
 ```
 
 ## LAN Prerequisites
@@ -125,7 +125,7 @@ play_client.ps1
 play_client.sh
 start_client.ps1
 start_client.sh
-test02.py
+battlezone_game.py
 requirements.txt
 config/
 models/

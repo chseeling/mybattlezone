@@ -10,7 +10,7 @@ if (-not (Test-Path $python)) {
 
 Push-Location $root
 try {
-    & $python (Join-Path $root "test02.py")
+    & $python (Join-Path $root "battlezone_game.py")
 }
 finally {
     Pop-Location

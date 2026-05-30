@@ -18,7 +18,7 @@ SERVER_PATHS = [
     "start_server.sh",
     "Dockerfile",
     "requirements.txt",
-    "test02.py",
+    "battlezone_game.py",
     "README.md",
     "docs/lan_deployment.md",
 ]

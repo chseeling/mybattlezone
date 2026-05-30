@@ -18,7 +18,7 @@ CLIENT_PATHS = [
     "start_client.ps1",
     "start_client.sh",
     "requirements.txt",
-    "test02.py",
+    "battlezone_game.py",
     "README.md",
     "docs/lan_deployment.md",
 ]

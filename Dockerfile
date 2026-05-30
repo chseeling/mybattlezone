@@ -39,7 +39,7 @@ COPY config ./config
 COPY models ./models
 COPY sfx ./sfx
 COPY battlezone ./battlezone
-COPY test02.py README.md ./
+COPY battlezone_game.py README.md ./
 
 EXPOSE 51515/udp
 
