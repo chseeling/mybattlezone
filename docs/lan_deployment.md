@@ -98,6 +98,14 @@ models/
 sfx/
 ```
 
+Build the ZIP from a developer checkout:
+
+```powershell
+python .\scripts\package_client.py
+```
+
+The output is written to `dist/mybattlezone-client.zip`.
+
 Expected first-run flow:
 
 1. Install Python.

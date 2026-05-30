@@ -123,6 +123,18 @@ models/
 sfx/
 ```
 
+Build that ZIP from the repo with:
+
+```powershell
+python .\scripts\package_client.py
+```
+
+or:
+
+```powershell
+.\scripts\package_client.ps1
+```
+
 For Raspberry Pi or Linux:
 
 ```bash
