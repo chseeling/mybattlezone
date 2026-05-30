@@ -1,6 +1,6 @@
 import sys
 
-from client_launcher import main
+from .client_launcher_ui import main
 
 
 if __name__ == "__main__":
