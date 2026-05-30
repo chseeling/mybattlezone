@@ -179,6 +179,12 @@ or:
 .\scripts\package_server.ps1
 ```
 
+Build both client and server ZIPs together:
+
+```powershell
+python .\scripts\package_all.py
+```
+
 ## Controls
 
 - Arrow keys: move and turn

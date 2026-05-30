@@ -62,6 +62,12 @@ python .\scripts\package_server.py
 
 The output is written to `dist/mybattlezone-server.zip`.
 
+Build both the client and server ZIPs together:
+
+```powershell
+python .\scripts\package_all.py
+```
+
 ## Client
 
 Run the client launcher:
