@@ -1737,8 +1737,8 @@ class MyApp(ShowBase):
         barrel_tilt = self.joystick_axis_value(JOYSTICK_BARREL_AXES)
         if not barrel_tilt:
             barrel_tilt = self.joystick_button_direction(
-                JOYSTICK_BARREL_DOWN_BUTTONS,
                 JOYSTICK_BARREL_UP_BUTTONS,
+                JOYSTICK_BARREL_DOWN_BUTTONS,
             )
 
         fire_down = self.joystick_fire_down()
