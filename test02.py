@@ -291,6 +291,8 @@ PLAYER_NETWORK_HIT_RADIUS = 1.55
 PLAYER_HIT_EFFECT_SECONDS = 1.2
 PROJECTILE_COLLISION_RADIUS = 0.18
 TANK_COLLISION_RADIUS = 1.6
+PLAYER_TANK_COLLISION_RATTLE_COOLDOWN = 0.35
+PLAYER_TANK_COLLISION_CONTACT_PADDING = 0.12
 AUTONOMOUS_TANK_MAX_SPEED = 9.0
 AUTONOMOUS_TANK_TURNING_SPEED_FACTOR = 0.45
 PLAYER_CAMERA_HEIGHT = 2.0
@@ -1371,11 +1373,14 @@ class MyApp(ShowBase):
         self.enemyShot_snd = base.loader.loadSfx("sfx/enemyShot.ogg")
         self.enemyTankExplosion_snd = base.loader.loadSfx("sfx/enemyTankExplosion.ogg")
         self.playerHit_snd = base.loader.loadSfx("sfx/enemyTankExplosion.ogg")
+        self.tankCollisionRattle_snd = base.loader.loadSfx("sfx/tankCollisionRattle.wav")
         self.gameOver_snd = base.loader.loadSfx("sfx/gameOver.wav")
         self.investigation_snd = base.loader.loadSfx("sfx/investigation.wav")
         self.investigation_snd.setLoop(True)
         self.audio_focus_enabled = AUDIO_FOCUS_MUTE
         self.audio_has_focus = True
+        self.player_tank_collision_rattle_next_time = 0.0
+        self.player_tank_collision_contact_active = False
         self.joystick_device = None
         self.joystick_last_fire_down = False
         self.sound_base_volumes = {
@@ -1384,6 +1389,7 @@ class MyApp(ShowBase):
             self.enemyShot_snd: 1.0,
             self.enemyTankExplosion_snd: 1.0,
             self.playerHit_snd: 0.42,
+            self.tankCollisionRattle_snd: 0.62,
             self.gameOver_snd: 1.0,
             self.investigation_snd: 0.9,
         }
@@ -3356,6 +3362,29 @@ class MyApp(ShowBase):
                 sound.play()
             self.network_snapshot_shot_visible[tank_id] = shooting
 
+    def update_network_tank_collision_rattle(self, tank_states):
+        if not self.is_network_client_controller():
+            return
+        if self.waiting_to_start or self.game_over or self.investigation_mode:
+            self.player_tank_collision_contact_active = False
+            return
+
+        tank_id = self.network_current_tank_id()
+        state = tank_states.get(tank_id)
+        if not state:
+            self.player_tank_collision_contact_active = False
+            return
+
+        contacting = self.tank_contacts_other_tank(
+            tank_id,
+            self.snapshot_state_point(state, "pos"),
+            self.tank_avatars[tank_id].collision_radius,
+            tank_states
+        )
+        if contacting and not self.player_tank_collision_contact_active:
+            self.play_player_tank_collision_rattle()
+        self.player_tank_collision_contact_active = contacting
+
     def snapshot_state_point(self, state, key):
         return Point3(*state[key])
 
@@ -3539,6 +3568,7 @@ class MyApp(ShowBase):
         self.update_network_snapshot_visibility(targets)
 
         tank_states = targets.get("tanks", {})
+        self.update_network_tank_collision_rattle(tank_states)
         view_tank_id = self.network_current_tank_id()
         view_state = self.network_view_state_for_tank(view_tank_id, tank_states)
         if view_state:
@@ -6184,6 +6214,42 @@ class MyApp(ShowBase):
 
         return resolved
 
+    def tank_contacts_other_tank(self, tank_id, pos, body_radius, tank_states=None):
+        pos = Point3(pos)
+        for other_tank_id in self.tank_ids_for_state():
+            if other_tank_id == tank_id:
+                continue
+
+            if tank_states is not None:
+                state = tank_states.get(other_tank_id)
+                if not state or state.get("hidden", False):
+                    continue
+                if not state.get("alive", True) or state.get("reconstituting", False):
+                    continue
+                other_pos = self.snapshot_state_point(state, "pos")
+            else:
+                avatar = self.tank_avatars.get(other_tank_id)
+                if avatar is None or avatar.is_hidden():
+                    continue
+                other_pos = avatar.get_pos()
+
+            other_radius = self.tank_avatars[other_tank_id].collision_radius
+            min_dist = body_radius + other_radius + PLAYER_TANK_COLLISION_CONTACT_PADDING
+            dx = pos[0] - other_pos[0]
+            dy = pos[1] - other_pos[1]
+            if dx * dx + dy * dy <= min_dist * min_dist:
+                return True
+        return False
+
+    def play_player_tank_collision_rattle(self):
+        if self.is_network_server_authority():
+            return
+        now = ClockObject.getGlobalClock().getFrameTime()
+        if now < self.player_tank_collision_rattle_next_time:
+            return
+        self.player_tank_collision_rattle_next_time = now + PLAYER_TANK_COLLISION_RATTLE_COOLDOWN
+        self.tankCollisionRattle_snd.play()
+
     def is_obstacle_blocked(self, pos, body_radius):
         resolved = self.resolve_obstacle_position(pos, body_radius)
         return math.sqrt((resolved[0] - pos[0]) ** 2 + (resolved[1] - pos[1]) ** 2) > 0.001
@@ -6736,10 +6802,13 @@ class MyApp(ShowBase):
         if command.throttle:
             move_step = camera_dict["translate_vel"] * dt * command.throttle
             step = render.getRelativeVector(self.camera, (0, move_step, 0))
+            body_radius = self.tank_avatars["0"].collision_radius
             next_pos = self.resolve_obstacle_position(
                 self.camera.getPos(render) + step,
-                self.tank_avatars["0"].collision_radius
+                body_radius
             )
+            if self.tank_contacts_other_tank("0", next_pos, body_radius):
+                self.play_player_tank_collision_rattle()
             self.camera.setPos(render, self.terrain_position(next_pos, PLAYER_CAMERA_HEIGHT))
 
         if command.fire:
@@ -6783,9 +6852,10 @@ class MyApp(ShowBase):
 
         self.apply_barrel_tilt_command("0", command, dt)
 
+        body_radius = self.tank_avatars["0"].collision_radius
         target_world = self.resolve_obstacle_position(
             command.desired_world_pos,
-            self.tank_avatars["0"].collision_radius
+            body_radius
         )
         current_world = Point3(self.camera.getPos(render))
         to_target = target_world - current_world
@@ -6821,8 +6891,10 @@ class MyApp(ShowBase):
         )
         avoided_world = self.resolve_obstacle_position(
             candidate_world,
-            self.tank_avatars["0"].collision_radius
+            body_radius
         )
+        if self.tank_contacts_other_tank("0", avoided_world, body_radius):
+            self.play_player_tank_collision_rattle()
         self.camera.setPos(render, self.terrain_position(avoided_world, PLAYER_CAMERA_HEIGHT))
         self.camera.setHpr(render, *self.terrain_surface_hpr(
             self.camera.getX(render),
