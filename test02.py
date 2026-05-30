@@ -282,6 +282,9 @@ PLAYER_FLASH_SECONDS = 0.45
 PLAYER_HIT_SHAKE_SECONDS = 0.32
 PLAYER_HIT_SHAKE_YAW = 1.2
 PLAYER_HIT_SHAKE_PITCH = 0.7
+PLAYER_COLLISION_SHAKE_SECONDS = 0.18
+PLAYER_COLLISION_SHAKE_YAW = 0.9
+PLAYER_COLLISION_SHAKE_PITCH = 0.55
 PLAYER_RESTART_GRACE_SECONDS = 1.0
 PLAYER_COLLISION_RADIUS = 1.5
 PLAYER_HIT_COLLISION_RADIUS = 1.45
@@ -1381,6 +1384,8 @@ class MyApp(ShowBase):
         self.audio_has_focus = True
         self.player_tank_collision_rattle_next_time = 0.0
         self.player_tank_collision_contact_active = False
+        self.player_collision_shake_started_at = 0.0
+        self.player_collision_shake_until = 0.0
         self.joystick_device = None
         self.joystick_last_fire_down = False
         self.sound_base_volumes = {
@@ -1389,7 +1394,7 @@ class MyApp(ShowBase):
             self.enemyShot_snd: 1.0,
             self.enemyTankExplosion_snd: 1.0,
             self.playerHit_snd: 0.42,
-            self.tankCollisionRattle_snd: 0.62,
+            self.tankCollisionRattle_snd: 0.78,
             self.gameOver_snd: 1.0,
             self.investigation_snd: 0.9,
         }
@@ -2621,6 +2626,22 @@ class MyApp(ShowBase):
         jitter_pitch = math.sin(elapsed * 137.0 + 0.7) * PLAYER_HIT_SHAKE_PITCH * falloff
         self.camera.setHpr(self.camera, jitter_yaw, jitter_pitch, 0)
 
+    def apply_player_collision_camera_shake(self):
+        now = ClockObject.getGlobalClock().getFrameTime()
+        if now >= getattr(self, "player_collision_shake_until", 0):
+            return
+        duration = max(0.001, PLAYER_COLLISION_SHAKE_SECONDS)
+        elapsed = max(0, now - getattr(self, "player_collision_shake_started_at", now))
+        falloff = max(0.0, 1.0 - elapsed / duration)
+        jitter_yaw = math.sin(elapsed * 150.0 + 0.3) * PLAYER_COLLISION_SHAKE_YAW * falloff
+        jitter_pitch = math.sin(elapsed * 210.0 + 1.1) * PLAYER_COLLISION_SHAKE_PITCH * falloff
+        self.camera.setHpr(self.camera, jitter_yaw, jitter_pitch, 0)
+
+    def apply_player_camera_feedback_shake(self, include_hit=False):
+        if include_hit:
+            self.apply_player_hit_camera_shake()
+        self.apply_player_collision_camera_shake()
+
     def window_has_audio_focus(self):
         try:
             properties = base.win.getProperties()
@@ -3549,8 +3570,7 @@ class MyApp(ShowBase):
             self.camera.setPos(render, self.snapshot_state_point(view_state, "pos"))
             self.camera.setHpr(render, *self.snapshot_state_hpr(view_state))
             self.player_barrel_tilt = float(view_state.get("barrel_tilt", 0.0))
-            if view_tank_id == "0":
-                self.apply_player_hit_camera_shake()
+            self.apply_player_camera_feedback_shake(include_hit=view_tank_id == "0")
 
         for tank_id in self.tank_ids_for_state():
             state = tank_states.get(tank_id)
@@ -3574,8 +3594,7 @@ class MyApp(ShowBase):
         if view_state:
             self.set_node_to_snapshot(self.camera, view_state)
             self.player_barrel_tilt = float(view_state.get("barrel_tilt", 0.0))
-            if view_tank_id == "0":
-                self.apply_player_hit_camera_shake()
+            self.apply_player_camera_feedback_shake(include_hit=view_tank_id == "0")
 
         for tank_id in self.tank_ids_for_state():
             state = tank_states.get(tank_id)
@@ -4694,6 +4713,8 @@ class MyApp(ShowBase):
         self.hit_flash_alpha = 0
         self.player_hit_shake_until = 0
         self.player_hit_shake_started_at = 0
+        self.player_collision_shake_until = 0
+        self.player_collision_shake_started_at = 0
         self.player_tank_visual_hidden_for_effect = False
         self.hitFlashNp.hide()
         self.gameOverTextObject.hide()
@@ -4755,6 +4776,8 @@ class MyApp(ShowBase):
         self.hit_flash_alpha = 0
         self.player_hit_shake_until = 0
         self.player_hit_shake_started_at = 0
+        self.player_collision_shake_until = 0
+        self.player_collision_shake_started_at = 0
         self.player_tank_visual_hidden_for_effect = False
         self.gameOverTextObject.hide()
         self.startTextObject.hide()
@@ -5139,6 +5162,8 @@ class MyApp(ShowBase):
         self.hit_flash_alpha = 0
         self.player_hit_shake_until = 0
         self.player_hit_shake_started_at = 0
+        self.player_collision_shake_until = 0
+        self.player_collision_shake_started_at = 0
         self.player_damage_event_serial = 0
         self.network_player_damage_event_serial = 0
         self.investigation_mode = False
@@ -6248,6 +6273,8 @@ class MyApp(ShowBase):
         if now < self.player_tank_collision_rattle_next_time:
             return
         self.player_tank_collision_rattle_next_time = now + PLAYER_TANK_COLLISION_RATTLE_COOLDOWN
+        self.player_collision_shake_started_at = now
+        self.player_collision_shake_until = now + PLAYER_COLLISION_SHAKE_SECONDS
         self.tankCollisionRattle_snd.play()
 
     def is_obstacle_blocked(self, pos, body_radius):
@@ -7235,6 +7262,7 @@ class MyApp(ShowBase):
         if not self.network_client_has_snapshot():
             self.set_player_camera_on_terrain()
             self.update_player_tank_visual()
+            self.apply_player_camera_feedback_shake(include_hit=True)
 
         vectH = self.camera.getHpr()
         vectP = self.camera.getPos()
