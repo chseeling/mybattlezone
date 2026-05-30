@@ -33,12 +33,20 @@ Or from PowerShell on Windows:
 The deployment entrypoints live under the `battlezone` package:
 
 ```text
-battlezone.client          LAN client entrypoint
-battlezone.client_launcher client launcher entrypoint
-battlezone.server          authoritative LAN server entrypoint
+battlezone.client              LAN client entrypoint
+battlezone.client_launcher     client launcher entrypoint
+battlezone.client_launcher_ui  launcher implementation
+battlezone.config              environment/default configuration
+battlezone.controllers         tank command/controller primitives
+battlezone.network             UDP networking bridge
+battlezone.protocol            wire protocol constants
+battlezone.runtime             runtime importer
+battlezone.server              authoritative LAN server entrypoint
 ```
 
 `test02.py` remains the legacy game engine entrypoint while the runtime is split into cleaner client/server launch paths.
+
+See [docs/lan_deployment.md](docs/lan_deployment.md) for LAN setup, Raspberry Pi commands, Docker notes, and casual-client packaging.
 
 ## Network Server
 
@@ -65,7 +73,7 @@ cd C:\Users\cseel\myProjects\mybattlezone
 python -m battlezone.client --host 127.0.0.1 --tank 0 --full-render
 ```
 
-Use `BATTLEZONE_NET_HOST="0.0.0.0"` on the server when accepting LAN clients, and use the server machine's LAN IP on the client.
+Use `--host 0.0.0.0` on the server when accepting LAN clients, and use the server machine's LAN IP on the client.
 
 ## Client Launcher
 
@@ -93,7 +101,7 @@ or:
 sh play_client.sh
 ```
 
-The launcher saves the server IP, port, tank, controller, and render mode in `client_config.json`. Use the server PC's LAN IP, for example `192.168.1.42`, not the Docker container IP.
+The launcher saves the server IP, port, tank, controller, and render mode in `client_config.json`. Use the server PC's LAN IP, for example `192.168.1.42`, not the Docker container IP. The client needs Python and Panda3D; it does not need pygame.
 
 To launch directly from a terminal:
 
@@ -115,6 +123,17 @@ models/
 sfx/
 ```
 
+For Raspberry Pi or Linux:
+
+```bash
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m battlezone.client_launcher --host 192.168.1.42 --tank 0 --low-render --play
+```
+
 ## Docker Server
 
 Build and run the log-mode UDP server locally:
@@ -127,6 +146,14 @@ docker run --rm -it -p 51515:51515/udp `
 ```
 
 Then run a local client with `$env:BATTLEZONE_NET_HOST="127.0.0.1"`.
+
+For LAN clients, keep the Docker port publish as UDP and connect to the Docker host's LAN IP:
+
+```powershell
+docker run --rm -it -p 51515:51515/udp mybattlezone-server
+```
+
+The container has an internal IP, but casual clients should not use it.
 
 ## Controls
 
