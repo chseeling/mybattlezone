@@ -1549,6 +1549,8 @@ class MyApp(ShowBase):
         np_list = render.findAllMatches("**/ceTankRound*")
         for np in np_list:
             traverser.addCollider(np, self.collHandEvent)
+        for t in tanks_list:
+            self.set_tank_round_collision_enabled(t, False)
 
         self.player_barrel_tilt = 0.0
         for t in tanks_list:
@@ -3017,6 +3019,16 @@ class MyApp(ShowBase):
         if tank_id == "0":
             return "shot-done"
         return "shot{}-done".format(tank_id)
+
+    def set_tank_round_collision_enabled(self, tank_id, enabled):
+        if tank_id == "0":
+            return
+        shot_np = self.tank_shot_node(tank_id)
+        collision_np = shot_np.find("**/ceTankRound{}".format(tank_id))
+        if collision_np.isEmpty():
+            return
+        mask = BitMask32(0x20) if enabled else BitMask32(0)
+        collision_np.node().setFromCollideMask(mask)
 
     def tank_shot_start(self, tank_id):
         if tank_id == "0":
@@ -6368,7 +6380,6 @@ class MyApp(ShowBase):
         target = Point3(target_pos)
         vx = target[0] - start[0]
         vy = target[1] - start[1]
-        path_len = math.sqrt(vx * vx + vy * vy)
         earliest_t = None
 
         for _other_tank_id, other_pos, other_radius in self.other_tank_collision_bodies(tank_id, tank_states):
@@ -6395,12 +6406,12 @@ class MyApp(ShowBase):
 
         collided = earliest_t is not None
         if collided:
-            retreat_t = 0.04 / max(path_len, 0.001)
-            safe_t = max(0.0, earliest_t - retreat_t)
-            target = Point3(start[0] + vx * safe_t, start[1] + vy * safe_t, target[2])
+            return Point3(start), True
 
         target, pushed = self.resolve_tank_collision_position(tank_id, target, body_radius, tank_states)
-        return target, collided or pushed
+        if pushed:
+            return Point3(start), True
+        return target, False
 
     def play_player_tank_collision_rattle(self):
         if self.is_network_server_authority():
@@ -7188,6 +7199,7 @@ class MyApp(ShowBase):
             self.sight_engaged_np.show()
             self.sight_clear_np.hide()
         else:
+            self.set_tank_round_collision_enabled(tank_id, True)
             self.set_tank_shooting(tank_id, True)
 
         shot_np.wrtReparentTo(render)
@@ -7277,6 +7289,7 @@ class MyApp(ShowBase):
         if tank_id == "0":
             shot_np.hide()
         else:
+            self.set_tank_round_collision_enabled(tank_id, False)
             shot_np.show()
             self.set_tank_shooting(tank_id, False)
 
