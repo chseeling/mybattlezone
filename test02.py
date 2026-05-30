@@ -297,6 +297,7 @@ TANK_COLLISION_RADIUS = 1.9
 PLAYER_TANK_COLLISION_RATTLE_COOLDOWN = 0.35
 PLAYER_TANK_COLLISION_CONTACT_PADDING = 0.45
 PLAYER_TANK_DAMAGE_CONTACT_IMMUNITY_PADDING = 0.9
+PLAYER_TANK_CONTACT_DAMAGE_GRACE_SECONDS = 0.45
 INCOMING_TANK_SHELL_ARMING_DISTANCE = TANK_COLLISION_RADIUS + PLAYER_NETWORK_HIT_RADIUS + 0.45
 INCOMING_TANK_SHELL_CLOSE_RANGE_LOCKOUT = TANK_COLLISION_RADIUS + PLAYER_COLLISION_RADIUS + PLAYER_NETWORK_HIT_RADIUS + 0.75
 AUTONOMOUS_TANK_MAX_SPEED = 9.0
@@ -6303,12 +6304,19 @@ class MyApp(ShowBase):
         return False
 
     def player_tank_in_damage_blocking_contact(self):
+        now = ClockObject.getGlobalClock().getFrameTime()
+        if now < getattr(self, "player_tank_body_contact_damage_block_until", 0.0):
+            return True
         return self.tank_contacts_other_tank(
             "0",
             self.tank_body_pos("0"),
             self.tank_avatars["0"].collision_radius,
             extra_padding=PLAYER_TANK_DAMAGE_CONTACT_IMMUNITY_PADDING
         )
+
+    def mark_player_tank_body_contact(self):
+        now = ClockObject.getGlobalClock().getFrameTime()
+        self.player_tank_body_contact_damage_block_until = now + PLAYER_TANK_CONTACT_DAMAGE_GRACE_SECONDS
 
     def tank_contacts_specific_tank(self, tank_id, other_tank_id, pos=None, padding=0.0, tank_states=None):
         if pos is None:
@@ -6412,6 +6420,61 @@ class MyApp(ShowBase):
         if pushed:
             return Point3(start), True
         return target, False
+
+    def set_tank_body_world_pos(self, tank_id, pos):
+        pos = Point3(pos)
+        if tank_id == "0":
+            self.camera.setPos(render, self.terrain_position(pos, PLAYER_CAMERA_HEIGHT))
+            self.sync_tank_body_to_control("0")
+            return
+
+        tank_np = tanks_dict[tank_id]["tank"]
+        heading = tank_np.getH(render)
+        surface_world = self.terrain_position(pos)
+        tanks_dict[tank_id]["last_pos"] = Point3(surface_world)
+        tank_np.setPos(render, surface_world)
+        tank_np.setHpr(render, *self.terrain_surface_hpr(surface_world[0], surface_world[1], heading, "x"))
+
+    def enforce_tank_body_separation(self):
+        tank_ids = self.tank_ids_for_state()
+        for _ in range(4):
+            moved = False
+            for index, tank_id in enumerate(tank_ids):
+                avatar = self.tank_avatars.get(tank_id)
+                if avatar is None or avatar.is_hidden():
+                    continue
+                for other_id in tank_ids[index + 1:]:
+                    other_avatar = self.tank_avatars.get(other_id)
+                    if other_avatar is None or other_avatar.is_hidden():
+                        continue
+
+                    pos = self.tank_body_pos(tank_id)
+                    other_pos = self.tank_body_pos(other_id)
+                    min_dist = avatar.collision_radius + other_avatar.collision_radius + PLAYER_TANK_COLLISION_CONTACT_PADDING
+                    dx = pos[0] - other_pos[0]
+                    dy = pos[1] - other_pos[1]
+                    dist_sq = dx * dx + dy * dy
+                    if dist_sq >= min_dist * min_dist:
+                        continue
+
+                    if dist_sq < 0.0001:
+                        heading = self.tank_body_heading(tank_id)
+                        dx = math.sin(math.radians(heading))
+                        dy = math.cos(math.radians(heading))
+                        dist = 1.0
+                    else:
+                        dist = math.sqrt(dist_sq)
+
+                    push = (min_dist - dist + 0.02) * 0.5
+                    nx = dx / dist
+                    ny = dy / dist
+                    self.set_tank_body_world_pos(tank_id, Point3(pos[0] + nx * push, pos[1] + ny * push, pos[2]))
+                    self.set_tank_body_world_pos(other_id, Point3(other_pos[0] - nx * push, other_pos[1] - ny * push, other_pos[2]))
+                    if tank_id == "0" or other_id == "0":
+                        self.mark_player_tank_body_contact()
+                    moved = True
+            if not moved:
+                break
 
     def play_player_tank_collision_rattle(self):
         if self.is_network_server_authority():
@@ -6935,6 +6998,7 @@ class MyApp(ShowBase):
         for t in tanks_list:
             if self.tank_can_run_controller(t):
                 self.apply_controller_command(t, dt, task.time)
+        self.enforce_tank_body_separation()
 
         return Task.cont
 
@@ -6994,8 +7058,10 @@ class MyApp(ShowBase):
             )
             next_pos = self.resolve_obstacle_position(next_pos, body_radius)
             if tank_collision:
+                self.mark_player_tank_body_contact()
                 self.play_player_tank_collision_rattle()
             self.camera.setPos(render, self.terrain_position(next_pos, PLAYER_CAMERA_HEIGHT))
+            self.enforce_tank_body_separation()
 
         if command.fire:
             self.shoot()
@@ -7087,8 +7153,10 @@ class MyApp(ShowBase):
         )
         avoided_world = self.resolve_obstacle_position(avoided_world, body_radius)
         if tank_collision:
+            self.mark_player_tank_body_contact()
             self.play_player_tank_collision_rattle()
         self.camera.setPos(render, self.terrain_position(avoided_world, PLAYER_CAMERA_HEIGHT))
+        self.enforce_tank_body_separation()
         self.camera.setHpr(render, *self.terrain_surface_hpr(
             self.camera.getX(render),
             self.camera.getY(render),
@@ -7129,6 +7197,7 @@ class MyApp(ShowBase):
             tank_np.setPos(local_pos)
             heading = tank_np.getH(render)
             tank_np.setHpr(render, *self.terrain_surface_hpr(surface_world[0], surface_world[1], heading, "x"))
+            self.enforce_tank_body_separation()
 
     def apply_autonomous_tank_command(self, t, command, dt):
         if command.desired_world_pos is None:
@@ -7189,6 +7258,7 @@ class MyApp(ShowBase):
         tanks_dict[t]["last_pos"] = Point3(surface_world)
         tanks_dict[t]["tank"].setPos(local_pos)
         tanks_dict[t]["tank"].setHpr(render, *self.terrain_surface_hpr(surface_world[0], surface_world[1], heading, "x"))
+        self.enforce_tank_body_separation()
 
     def prepare_tank_shot(self, tank_id):
         shot_np = self.tank_shot_node(tank_id)
