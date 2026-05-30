@@ -286,16 +286,17 @@ PLAYER_COLLISION_SHAKE_SECONDS = 0.18
 PLAYER_COLLISION_SHAKE_YAW = 0.9
 PLAYER_COLLISION_SHAKE_PITCH = 0.55
 PLAYER_RESTART_GRACE_SECONDS = 1.0
-PLAYER_COLLISION_RADIUS = 1.5
+PLAYER_COLLISION_RADIUS = 1.8
 PLAYER_HIT_COLLISION_RADIUS = 1.45
 PLAYER_HIT_COLLISION_CENTER_Z = -1.15
 PLAYER_HIT_MAX_HEIGHT_ABOVE_GROUND = 2.15
 PLAYER_NETWORK_HIT_RADIUS = 1.55
 PLAYER_HIT_EFFECT_SECONDS = 1.2
 PROJECTILE_COLLISION_RADIUS = 0.18
-TANK_COLLISION_RADIUS = 1.6
+TANK_COLLISION_RADIUS = 1.9
 PLAYER_TANK_COLLISION_RATTLE_COOLDOWN = 0.35
-PLAYER_TANK_COLLISION_CONTACT_PADDING = 0.12
+PLAYER_TANK_COLLISION_CONTACT_PADDING = 0.45
+PLAYER_TANK_DAMAGE_CONTACT_IMMUNITY_PADDING = 0.9
 INCOMING_TANK_SHELL_ARMING_DISTANCE = TANK_COLLISION_RADIUS + PLAYER_NETWORK_HIT_RADIUS + 0.45
 INCOMING_TANK_SHELL_CLOSE_RANGE_LOCKOUT = TANK_COLLISION_RADIUS + PLAYER_COLLISION_RADIUS + PLAYER_NETWORK_HIT_RADIUS + 0.75
 AUTONOMOUS_TANK_MAX_SPEED = 9.0
@@ -4041,6 +4042,8 @@ class MyApp(ShowBase):
     def incoming_player_hit_is_contact_artifact(self, shooter_id, shot_start, shot_end):
         if shooter_id not in tanks_list:
             return False
+        if self.player_tank_in_damage_blocking_contact():
+            return True
         if self.tank_is_too_close_to_player_for_shell_damage(shooter_id):
             return True
         if self.tank_contacts_specific_tank(
@@ -6277,15 +6280,23 @@ class MyApp(ShowBase):
 
         return resolved
 
-    def tank_contacts_other_tank(self, tank_id, pos, body_radius, tank_states=None):
+    def tank_contacts_other_tank(self, tank_id, pos, body_radius, tank_states=None, extra_padding=0.0):
         pos = Point3(pos)
         for _other_tank_id, other_pos, other_radius in self.other_tank_collision_bodies(tank_id, tank_states):
-            min_dist = body_radius + other_radius + PLAYER_TANK_COLLISION_CONTACT_PADDING
+            min_dist = body_radius + other_radius + PLAYER_TANK_COLLISION_CONTACT_PADDING + extra_padding
             dx = pos[0] - other_pos[0]
             dy = pos[1] - other_pos[1]
             if dx * dx + dy * dy <= min_dist * min_dist:
                 return True
         return False
+
+    def player_tank_in_damage_blocking_contact(self):
+        return self.tank_contacts_other_tank(
+            "0",
+            self.tank_body_pos("0"),
+            self.tank_avatars["0"].collision_radius,
+            extra_padding=PLAYER_TANK_DAMAGE_CONTACT_IMMUNITY_PADDING
+        )
 
     def tank_contacts_specific_tank(self, tank_id, other_tank_id, pos=None, padding=0.0, tank_states=None):
         if pos is None:
@@ -6351,6 +6362,45 @@ class MyApp(ShowBase):
             if not moved:
                 break
         return resolved, collided
+
+    def resolve_tank_collision_swept_position(self, tank_id, start_pos, target_pos, body_radius, tank_states=None):
+        start = Point3(start_pos)
+        target = Point3(target_pos)
+        vx = target[0] - start[0]
+        vy = target[1] - start[1]
+        path_len = math.sqrt(vx * vx + vy * vy)
+        earliest_t = None
+
+        for _other_tank_id, other_pos, other_radius in self.other_tank_collision_bodies(tank_id, tank_states):
+            min_dist = body_radius + other_radius + PLAYER_TANK_COLLISION_CONTACT_PADDING
+            sx = start[0] - other_pos[0]
+            sy = start[1] - other_pos[1]
+            a = vx * vx + vy * vy
+            if a < 0.0001:
+                continue
+
+            c = sx * sx + sy * sy - min_dist * min_dist
+            if c <= 0:
+                earliest_t = 0.0 if earliest_t is None else min(earliest_t, 0.0)
+                continue
+
+            b = 2.0 * (sx * vx + sy * vy)
+            discriminant = b * b - 4.0 * a * c
+            if discriminant < 0:
+                continue
+
+            entry_t = (-b - math.sqrt(discriminant)) / (2.0 * a)
+            if 0.0 <= entry_t <= 1.0 and (earliest_t is None or entry_t < earliest_t):
+                earliest_t = entry_t
+
+        collided = earliest_t is not None
+        if collided:
+            retreat_t = 0.04 / max(path_len, 0.001)
+            safe_t = max(0.0, earliest_t - retreat_t)
+            target = Point3(start[0] + vx * safe_t, start[1] + vy * safe_t, target[2])
+
+        target, pushed = self.resolve_tank_collision_position(tank_id, target, body_radius, tank_states)
+        return target, collided or pushed
 
     def play_player_tank_collision_rattle(self):
         if self.is_network_server_authority():
@@ -6920,11 +6970,17 @@ class MyApp(ShowBase):
             move_step = camera_dict["translate_vel"] * dt * command.throttle
             step = render.getRelativeVector(self.camera, (0, move_step, 0))
             body_radius = self.tank_avatars["0"].collision_radius
+            start_pos = Point3(self.camera.getPos(render))
             next_pos = self.resolve_obstacle_position(
-                self.camera.getPos(render) + step,
+                start_pos + step,
                 body_radius
             )
-            next_pos, tank_collision = self.resolve_tank_collision_position("0", next_pos, body_radius)
+            next_pos, tank_collision = self.resolve_tank_collision_swept_position(
+                "0",
+                start_pos,
+                next_pos,
+                body_radius
+            )
             next_pos = self.resolve_obstacle_position(next_pos, body_radius)
             if tank_collision:
                 self.play_player_tank_collision_rattle()
@@ -7012,7 +7068,12 @@ class MyApp(ShowBase):
             candidate_world,
             body_radius
         )
-        avoided_world, tank_collision = self.resolve_tank_collision_position("0", avoided_world, body_radius)
+        avoided_world, tank_collision = self.resolve_tank_collision_swept_position(
+            "0",
+            current_world,
+            avoided_world,
+            body_radius
+        )
         avoided_world = self.resolve_obstacle_position(avoided_world, body_radius)
         if tank_collision:
             self.play_player_tank_collision_rattle()
@@ -7039,11 +7100,17 @@ class MyApp(ShowBase):
             move_step = camera_dict["translate_vel"] * dt * command.throttle
             step = render.getRelativeVector(tank_np, (move_step, 0, 0))
             body_radius = self.tank_avatars[t].collision_radius
+            start_pos = Point3(tank_np.getPos(render))
             avoided_world = self.resolve_obstacle_position(
-                tank_np.getPos(render) + step,
+                start_pos + step,
                 body_radius
             )
-            avoided_world, _tank_collision = self.resolve_tank_collision_position(t, avoided_world, body_radius)
+            avoided_world, _tank_collision = self.resolve_tank_collision_swept_position(
+                t,
+                start_pos,
+                avoided_world,
+                body_radius
+            )
             avoided_world = self.resolve_obstacle_position(avoided_world, body_radius)
             surface_world = self.terrain_position(avoided_world)
             local_pos = tanks_dict[t]["Locator"].getRelativePoint(render, surface_world)
@@ -7099,7 +7166,12 @@ class MyApp(ShowBase):
             candidate_world,
             body_radius
         )
-        avoided_world, _tank_collision = self.resolve_tank_collision_position(t, avoided_world, body_radius)
+        avoided_world, _tank_collision = self.resolve_tank_collision_swept_position(
+            t,
+            current_world,
+            avoided_world,
+            body_radius
+        )
         avoided_world = self.resolve_obstacle_position(avoided_world, body_radius)
         surface_world = self.terrain_position(avoided_world)
         local_pos = locator.getRelativePoint(render, surface_world)
