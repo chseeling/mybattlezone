@@ -5,11 +5,36 @@ from panda3d.core import CollisionTraverser, CollisionHandlerEvent
 
 from direct.interval.IntervalGlobal import *
 
+from battlezone.config import (
+    DEFAULT_NETWORK_HOST,
+    DEFAULT_NETWORK_PORT,
+    DEFAULT_SERVER_LOG_INTERVAL,
+    DEFAULT_SERVER_TUI_WINDOW,
+    client_controller_default,
+    client_low_render_default,
+    configured_network_mode,
+    configured_network_mode_label,
+    configured_server_ui_mode,
+    env_bool,
+    should_silence_server_startup,
+)
+from battlezone.protocol import (
+    NETWORK_CLIENT_TIMEOUT,
+    NETWORK_COMMAND_HISTORY_LIMIT,
+    NETWORK_COMMAND_RETRY_RATE,
+    NETWORK_EFFECT_DELAY,
+    NETWORK_JOIN_RATE,
+    NETWORK_PENDING_COMMAND_LIMIT,
+    NETWORK_PROTOCOL_VERSION,
+    NETWORK_RENDER_DELAY,
+    NETWORK_SEND_RATE,
+    NETWORK_SMOOTHING_RATE,
+    NETWORK_SNAPSHOT_RATE,
+)
+
 loadPrcFile("config/conf.prc")
 
-_startup_net_mode = os.environ.get("BATTLEZONE_NET_MODE", "").lower()
-_startup_server_ui = os.environ.get("BATTLEZONE_SERVER_UI", "").lower()
-if _startup_net_mode in {"server", "host"} and _startup_server_ui in {"log", "logs", "json", "headless", "none", "off"}:
+if should_silence_server_startup():
     loadPrcFileData("battlezone-headless-server", "\n".join([
         "audio-library-name null",
         "notify-level-device fatal",
@@ -129,54 +154,31 @@ def configured_claimable_tanks():
 
 CLAIMABLE_TANK_IDS = configured_claimable_tanks()
 
-def configured_server_ui_mode():
-    requested = os.environ.get("BATTLEZONE_SERVER_UI", "").lower()
-    if requested:
-        return requested
-
-    legacy_tui = os.environ.get("BATTLEZONE_SERVER_TUI", "").lower()
-    if legacy_tui in {"1", "true", "yes", "on", "tui", "curses"}:
-        return "tui"
-    return "panda"
-
-DEBUG = os.environ.get("BATTLEZONE_DEBUG", "").lower() in {"1", "true", "yes", "on"}
-NETWORK_MODE = os.environ.get("BATTLEZONE_NET_MODE", "").lower()
-if NETWORK_MODE == "server":
-    NETWORK_MODE = "host"
-NETWORK_MODE_LABEL = "server" if os.environ.get("BATTLEZONE_NET_MODE", "").lower() == "server" else NETWORK_MODE
-NETWORK_HOST = os.environ.get("BATTLEZONE_NET_HOST", "127.0.0.1")
-NETWORK_PORT = int(os.environ.get("BATTLEZONE_NET_PORT", "51515"))
+DEBUG = env_bool("BATTLEZONE_DEBUG")
+NETWORK_MODE = configured_network_mode()
+NETWORK_MODE_LABEL = configured_network_mode_label()
+NETWORK_HOST = os.environ.get("BATTLEZONE_NET_HOST", DEFAULT_NETWORK_HOST)
+NETWORK_PORT = int(os.environ.get("BATTLEZONE_NET_PORT", DEFAULT_NETWORK_PORT))
 NETWORK_TANK_ID = os.environ.get("BATTLEZONE_NET_TANK", "1")
 NETWORK_CLIENT_CONTROLLER = os.environ.get(
     "BATTLEZONE_NET_CONTROLLER",
-    "human" if NETWORK_TANK_ID == "0" else "autonomous"
+    client_controller_default(NETWORK_TANK_ID)
 ).lower()
-NETWORK_PROTOCOL_VERSION = 1
-NETWORK_SEND_RATE = 30.0
-NETWORK_JOIN_RATE = 1.0
-NETWORK_SNAPSHOT_RATE = 25.0
-NETWORK_COMMAND_RETRY_RATE = 8.0
-NETWORK_COMMAND_HISTORY_LIMIT = 256
-NETWORK_PENDING_COMMAND_LIMIT = 64
-NETWORK_SMOOTHING_RATE = 14.0
-NETWORK_RENDER_DELAY = 0.08
-NETWORK_EFFECT_DELAY = NETWORK_RENDER_DELAY
-NETWORK_CLIENT_TIMEOUT = 2.5
-NETWORK_CLIENT_LOW_RENDER_DEFAULT = "0" if NETWORK_TANK_ID == "0" else "1"
-NETWORK_CLIENT_LOW_RENDER = os.environ.get("BATTLEZONE_NET_CLIENT_LOW_RENDER", NETWORK_CLIENT_LOW_RENDER_DEFAULT).lower() in {"1", "true", "yes", "on"}
+NETWORK_CLIENT_LOW_RENDER_DEFAULT = client_low_render_default(NETWORK_TANK_ID)
+NETWORK_CLIENT_LOW_RENDER = env_bool("BATTLEZONE_NET_CLIENT_LOW_RENDER", NETWORK_CLIENT_LOW_RENDER_DEFAULT == "1")
 NETWORK_CLIENT_LOW_RENDER_SIZE = (960, 540)
-NETWORK_SERVER_LOW_RENDER = os.environ.get("BATTLEZONE_NET_SERVER_LOW_RENDER", "1").lower() in {"1", "true", "yes", "on"}
+NETWORK_SERVER_LOW_RENDER = env_bool("BATTLEZONE_NET_SERVER_LOW_RENDER", True)
 NETWORK_SERVER_LOW_RENDER_SIZE = (720, 405)
 SERVER_UI_MODE = configured_server_ui_mode()
-SERVER_TUI_WINDOW_MODE = os.environ.get("BATTLEZONE_SERVER_TUI_WINDOW", "minimized").lower()
+SERVER_TUI_WINDOW_MODE = os.environ.get("BATTLEZONE_SERVER_TUI_WINDOW", DEFAULT_SERVER_TUI_WINDOW).lower()
 SERVER_WINDOW_MODE = os.environ.get("BATTLEZONE_SERVER_WINDOW", SERVER_TUI_WINDOW_MODE).lower()
-SERVER_LOG_INTERVAL = float(os.environ.get("BATTLEZONE_SERVER_LOG_INTERVAL", "5.0"))
+SERVER_LOG_INTERVAL = float(os.environ.get("BATTLEZONE_SERVER_LOG_INTERVAL", DEFAULT_SERVER_LOG_INTERVAL))
 AUDIO_FOCUS_MUTE_DEFAULT = "0" if (
     NETWORK_MODE == "client" and
     NETWORK_TANK_ID == "0" and
     NETWORK_CLIENT_CONTROLLER not in {"auto", "autonomous", "ai", "enemy"}
 ) else "1"
-AUDIO_FOCUS_MUTE = os.environ.get("BATTLEZONE_AUDIO_FOCUS_MUTE", AUDIO_FOCUS_MUTE_DEFAULT).lower() in {"1", "true", "yes", "on"}
+AUDIO_FOCUS_MUTE = env_bool("BATTLEZONE_AUDIO_FOCUS_MUTE", AUDIO_FOCUS_MUTE_DEFAULT == "1")
 MOUNTAIN_BLOOM_ALPHA = 0.11
 MOUNTAIN_BLOOM_THICKNESS = 7
 MOUNTAIN_HALO_ALPHA = 0.025

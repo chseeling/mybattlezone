@@ -5,16 +5,18 @@ import subprocess
 import sys
 from pathlib import Path
 
+from battlezone.config import DEFAULT_CLIENT_CONTROLLER, DEFAULT_CLIENT_TANK_ID, DEFAULT_NETWORK_HOST, DEFAULT_NETWORK_PORT
+
 
 APP_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = APP_DIR / "client_config.json"
 GAME_PATH = APP_DIR / "test02.py"
 
 DEFAULT_CONFIG = {
-    "server_host": "127.0.0.1",
-    "server_port": "51515",
-    "tank_id": "0",
-    "controller": "human",
+    "server_host": DEFAULT_NETWORK_HOST,
+    "server_port": DEFAULT_NETWORK_PORT,
+    "tank_id": DEFAULT_CLIENT_TANK_ID,
+    "controller": DEFAULT_CLIENT_CONTROLLER,
     "low_render": False,
 }
 

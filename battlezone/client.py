@@ -1,14 +1,15 @@
 import argparse
 
+from .config import DEFAULT_CLIENT_CONTROLLER, DEFAULT_CLIENT_TANK_ID, DEFAULT_NETWORK_HOST, DEFAULT_NETWORK_PORT
 from .runtime import run_game
 
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Run a Battlezone LAN client.")
-    parser.add_argument("--host", default="127.0.0.1", help="Server LAN IP or hostname.")
-    parser.add_argument("--port", default="51515", help="Server UDP port.")
-    parser.add_argument("--tank", default="0", help="Tank slot to claim.")
-    parser.add_argument("--controller", default="human", choices=["human", "autonomous", "auto", "ai"], help="Client controller.")
+    parser.add_argument("--host", default=DEFAULT_NETWORK_HOST, help="Server LAN IP or hostname.")
+    parser.add_argument("--port", default=DEFAULT_NETWORK_PORT, help="Server UDP port.")
+    parser.add_argument("--tank", default=DEFAULT_CLIENT_TANK_ID, help="Tank slot to claim.")
+    parser.add_argument("--controller", default=DEFAULT_CLIENT_CONTROLLER, choices=["human", "autonomous", "auto", "ai"], help="Client controller.")
     parser.add_argument("--low-render", action="store_true", help="Use the lighter client renderer.")
     parser.add_argument("--full-render", action="store_true", help="Use the full client renderer.")
     return parser.parse_args(argv)
