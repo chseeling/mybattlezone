@@ -1388,6 +1388,8 @@ class MyApp(ShowBase):
         self.audio_has_focus = True
         self.player_tank_collision_rattle_next_time = 0.0
         self.player_tank_collision_contact_active = False
+        self.player_tank_collision_event_serial = 0
+        self.network_player_tank_collision_event_serial = 0
         self.player_collision_shake_started_at = 0.0
         self.player_collision_shake_until = 0.0
         self.joystick_device = None
@@ -1502,12 +1504,16 @@ class MyApp(ShowBase):
         # Initialize collision Handler
         self.collHandEvent = CollisionHandlerEvent()
         self.collHandEvent.addInPattern('into-%in')
+        self.enemy_round_collision_paths = {}
+        self.enemy_round_collider_active = set()
 
         # collision spheres enemy tank
         for t in tanks_list:
             cs = CollisionSphere(0, 0, 0.9, tanks_dict[t]["coll_rad"])
             cnodePath = tanks_dict[t]["tank"].attachNewNode(CollisionNode('cTank' + t))
             cnodePath.node().addSolid(cs)
+            cnodePath.node().setFromCollideMask(BitMask32(0))
+            cnodePath.node().setIntoCollideMask(BitMask32(0x10))
 
             if DEBUG:
                 # cnodePath.show()
@@ -1522,19 +1528,25 @@ class MyApp(ShowBase):
         cs = CollisionSphere(0, 0, 0, PROJECTILE_COLLISION_RADIUS)
         tr_cnodePath = self.tank_round[0].attachNewNode(CollisionNode('cTankRound'))
         tr_cnodePath.node().addSolid(cs)
+        tr_cnodePath.node().setFromCollideMask(BitMask32(0x10))
+        tr_cnodePath.node().setIntoCollideMask(BitMask32(0))
 
         # collision spheres for enemy tank rounds
-        cs = CollisionSphere(0, 0, 0, PROJECTILE_COLLISION_RADIUS)
         for t in tanks_list:
+            cs = CollisionSphere(0, 0, 0, PROJECTILE_COLLISION_RADIUS)
             np = tanks_dict[t]["round"].attachNewNode(CollisionNode('ceTankRound' + t))
             np.node().addSolid(cs)
-            np.node().setFromCollideMask(BitMask32(0x20))
+            np.node().setFromCollideMask(BitMask32(0))
+            np.node().setIntoCollideMask(BitMask32(0))
+            self.enemy_round_collision_paths[t] = np
             # np.show()
 
         # collision sphere main tank
         cs = CollisionSphere(0, 0, PLAYER_HIT_COLLISION_CENTER_Z, PLAYER_HIT_COLLISION_RADIUS)
         np = self.camera.attachNewNode(CollisionNode('cmTank'))
         np.node().addSolid(cs)
+        np.node().setFromCollideMask(BitMask32(0))
+        np.node().setIntoCollideMask(BitMask32(0x20))
         # np.show()
 
         # Initialise Traverser
@@ -1542,14 +1554,12 @@ class MyApp(ShowBase):
         if DEBUG:
             traverser.showCollisions(render)
         base.cTrav = traverser
+        self.collision_traverser = traverser
 
 
         # from objects
         traverser.addCollider(tr_cnodePath, self.collHandEvent)
 
-        np_list = render.findAllMatches("**/ceTankRound*")
-        for np in np_list:
-            traverser.addCollider(np, self.collHandEvent)
         for t in tanks_list:
             self.set_tank_round_collision_enabled(t, False)
 
@@ -1578,6 +1588,7 @@ class MyApp(ShowBase):
         for t in tanks_list:
             tanks_dict[t]["move"] = True
         self.setup_tank_control_architecture()
+        self.previous_tank_body_positions = self.tank_body_positions_snapshot()
         self.setup_network_controller_prototype()
         self.setup_server_operator_ui()
 
@@ -2880,9 +2891,13 @@ class MyApp(ShowBase):
         return self.tank_runtime_state(tank_id)["aim_mount"]
 
     def tank_body_pos(self, tank_id):
+        if tank_id == "0":
+            self.sync_tank_body_to_control("0")
         return Point3(self.tank_body_node(tank_id).getPos(render))
 
     def tank_body_hpr(self, tank_id):
+        if tank_id == "0":
+            self.sync_tank_body_to_control("0")
         return self.tank_body_node(tank_id).getHpr(render)
 
     def tank_control_pos(self, tank_id):
@@ -2892,7 +2907,77 @@ class MyApp(ShowBase):
         return self.tank_control_node(tank_id).getH(render)
 
     def tank_body_heading(self, tank_id):
+        if tank_id == "0":
+            self.sync_tank_body_to_control("0")
         return self.tank_body_node(tank_id).getH(render)
+
+    def tank_forward_xy(self, tank_id):
+        if tank_id == "0":
+            heading = self.tank_control_heading(tank_id)
+            return Point3(math.sin(math.radians(heading)), math.cos(math.radians(heading)), 0)
+
+        heading = self.tank_body_heading(tank_id)
+        return Point3(math.cos(math.radians(heading)), math.sin(math.radians(heading)), 0)
+
+    def tank_body_positions_snapshot(self):
+        return {
+            tank_id: Point3(self.tank_body_pos(tank_id))
+            for tank_id in self.tank_ids_for_state()
+            if tank_id in self.tank_avatars and not self.tank_avatars[tank_id].is_hidden()
+        }
+
+    def tank_pair_separation_normal(self, tank_id, other_tank_id, pos, other_pos, movement_delta=None):
+        dx = pos[0] - other_pos[0]
+        dy = pos[1] - other_pos[1]
+        dist_sq = dx * dx + dy * dy
+
+        previous_positions = getattr(self, "previous_tank_body_positions", {})
+        previous_pos = previous_positions.get(tank_id)
+        previous_other_pos = previous_positions.get(other_tank_id)
+        if previous_pos is not None and previous_other_pos is not None:
+            pdx = previous_pos[0] - previous_other_pos[0]
+            pdy = previous_pos[1] - previous_other_pos[1]
+            previous_dist_sq = pdx * pdx + pdy * pdy
+            if previous_dist_sq > 0.0001 and (dist_sq < 0.0001 or dx * pdx + dy * pdy <= 0):
+                previous_dist = math.sqrt(previous_dist_sq)
+                return pdx / previous_dist, pdy / previous_dist
+
+        if dist_sq > 0.0001:
+            dist = math.sqrt(dist_sq)
+            return dx / dist, dy / dist
+
+        if movement_delta is not None:
+            mdx = movement_delta[0]
+            mdy = movement_delta[1]
+            movement_dist_sq = mdx * mdx + mdy * mdy
+            if movement_dist_sq > 0.0001:
+                movement_dist = math.sqrt(movement_dist_sq)
+                return -mdx / movement_dist, -mdy / movement_dist
+
+        forward = self.tank_forward_xy(tank_id)
+        forward_dist_sq = forward[0] * forward[0] + forward[1] * forward[1]
+        if forward_dist_sq > 0.0001:
+            forward_dist = math.sqrt(forward_dist_sq)
+            return -forward[0] / forward_dist, -forward[1] / forward_dist
+
+        return 1.0, 0.0
+
+    def tank_pair_crossed_since_previous(self, tank_id, other_tank_id):
+        previous_positions = getattr(self, "previous_tank_body_positions", {})
+        previous_pos = previous_positions.get(tank_id)
+        previous_other_pos = previous_positions.get(other_tank_id)
+        if previous_pos is None or previous_other_pos is None:
+            return False
+
+        pos = self.tank_body_pos(tank_id)
+        other_pos = self.tank_body_pos(other_tank_id)
+        previous_dx = previous_pos[0] - previous_other_pos[0]
+        previous_dy = previous_pos[1] - previous_other_pos[1]
+        current_dx = pos[0] - other_pos[0]
+        current_dy = pos[1] - other_pos[1]
+        if previous_dx * previous_dx + previous_dy * previous_dy < 0.0001:
+            return False
+        return previous_dx * current_dx + previous_dy * current_dy < 0
 
     def tank_body_pose_from_control(self, tank_id):
         runtime = self.tank_runtime_state(tank_id)
@@ -3024,12 +3109,34 @@ class MyApp(ShowBase):
     def set_tank_round_collision_enabled(self, tank_id, enabled):
         if tank_id == "0":
             return
-        shot_np = self.tank_shot_node(tank_id)
-        collision_np = shot_np.find("**/ceTankRound{}".format(tank_id))
-        if collision_np.isEmpty():
+        collision_np = getattr(self, "enemy_round_collision_paths", {}).get(tank_id)
+        if collision_np is None or collision_np.isEmpty():
             return
+        active = tank_id in getattr(self, "enemy_round_collider_active", set())
         mask = BitMask32(0x20) if enabled else BitMask32(0)
         collision_np.node().setFromCollideMask(mask)
+        collision_np.node().setIntoCollideMask(BitMask32(0))
+        if not hasattr(self, "collision_traverser"):
+            return
+
+        if enabled and not active:
+            self.collision_traverser.addCollider(collision_np, self.collHandEvent)
+            self.enemy_round_collider_active.add(tank_id)
+        elif not enabled and active:
+            self.collision_traverser.removeCollider(collision_np)
+            self.enemy_round_collider_active.discard(tank_id)
+
+    def tank_round_collision_enabled(self, tank_id):
+        if tank_id == "0":
+            return False
+        collision_np = getattr(self, "enemy_round_collision_paths", {}).get(tank_id)
+        if tank_id not in getattr(self, "enemy_round_collider_active", set()):
+            return False
+        if collision_np is None:
+            return False
+        if collision_np.isEmpty():
+            return False
+        return collision_np.node().getFromCollideMask() != BitMask32(0)
 
     def tank_shot_start(self, tank_id):
         if tank_id == "0":
@@ -3238,6 +3345,7 @@ class MyApp(ShowBase):
             "terrain_locked": self.terrain_selection_locked(),
             "player_lives": self.player_lives,
             "player_damage_event_serial": self.player_damage_event_serial,
+            "player_tank_collision_event_serial": self.player_tank_collision_event_serial,
             "player_hit_effect_serial": self.player_hit_effect_serial,
             "player_hit_effect_pos": self.point_to_list(self.player_hit_effect_pos),
             "player_hit_effect_hpr": self.hpr_to_list(self.player_hit_effect_hpr),
@@ -3317,6 +3425,18 @@ class MyApp(ShowBase):
             self.apply_network_player_investigation_event(snapshot.get("player_investigation_event"))
             self.trigger_player_hit_feedback()
         self.network_player_damage_event_serial = max(self.network_player_damage_event_serial, player_damage_serial)
+
+        player_tank_collision_serial = int(snapshot.get("player_tank_collision_event_serial", 0))
+        if (
+                self.network_current_tank_id() == "0" and
+                not first_snapshot and
+                not self.investigation_mode and
+                player_tank_collision_serial > self.network_player_tank_collision_event_serial):
+            self.play_player_tank_collision_rattle()
+        self.network_player_tank_collision_event_serial = max(
+            self.network_player_tank_collision_event_serial,
+            player_tank_collision_serial
+        )
 
         player_hit_serial = int(snapshot.get("player_hit_effect_serial", 0))
         if (
@@ -4057,6 +4177,8 @@ class MyApp(ShowBase):
             return False
         if self.player_tank_in_damage_blocking_contact():
             return True
+        if self.tank_pair_crossed_since_previous("0", shooter_id):
+            return True
         if self.tank_is_too_close_to_player_for_shell_damage(shooter_id):
             return True
         if self.tank_contacts_specific_tank(
@@ -4086,6 +4208,8 @@ class MyApp(ShowBase):
         shooter_id = from_name[-1]
         if not self.tank_is_shooting(shooter_id):
             return
+        if not self.tank_round_collision_enabled(shooter_id):
+            return
         if self.tank_shot_deflected(shooter_id):
             return
         shot_start = tanks_dict[shooter_id].get("shot_start", self.tank_shot_node(shooter_id).getPos(render))
@@ -4102,6 +4226,7 @@ class MyApp(ShowBase):
         if not self.consume_incoming_player_hit(shooter_id, now):
             return
 
+        lives_after = max(0, self.tank_lives("0") - 1)
         self.arm_investigation(
             shooter_id,
             shot_start,
@@ -4113,7 +4238,7 @@ class MyApp(ShowBase):
         self.enemy_reset_shot(shooter_id)
         self.last_player_hit_time = now
         self.set_tank_hit_cooldown("0", PLAYER_HIT_COOLDOWN)
-        self.set_tank_lives("0", max(0, self.tank_lives("0") - 1))
+        self.set_tank_lives("0", lives_after)
         self.record_player_tank_damage_event(shooter_id)
         self.record_player_damage_feedback()
         self.update_lives_hud()
@@ -4133,6 +4258,10 @@ class MyApp(ShowBase):
             return
         if shooter_id not in tanks_list:
             return
+        if not self.tank_is_shooting(shooter_id):
+            return
+        if not self.tank_round_collision_enabled(shooter_id):
+            return
         if self.tank_shot_deflected(shooter_id):
             return
 
@@ -4144,6 +4273,7 @@ class MyApp(ShowBase):
         if not self.consume_incoming_player_hit(shooter_id, now):
             return
 
+        lives_after = max(0, self.tank_lives("0") - 1)
         self.arm_investigation(
             shooter_id,
             Point3(shot_start),
@@ -4155,7 +4285,7 @@ class MyApp(ShowBase):
 
         self.last_player_hit_time = now
         self.set_tank_hit_cooldown("0", PLAYER_HIT_COOLDOWN)
-        self.set_tank_lives("0", max(0, self.tank_lives("0") - 1))
+        self.set_tank_lives("0", lives_after)
         self.record_player_tank_damage_event(shooter_id)
         self.record_player_damage_feedback()
         self.update_lives_hud()
@@ -4352,6 +4482,7 @@ class MyApp(ShowBase):
             self.set_tank_hit_cooldown(t, 0)
             self.enemy_reset_shot(t)
             self.reset_ai_tank_controller_for_match(t)
+        self.previous_tank_body_positions = self.tank_body_positions_snapshot()
         self.startTextObject.hide()
         for text_object in getattr(self, "environmentNameTextObjects", []):
             text_object.hide()
@@ -4795,6 +4926,7 @@ class MyApp(ShowBase):
             self.set_tank_hit_cooldown(t, 0)
             self.enemy_reset_shot(t)
 
+        self.previous_tank_body_positions = self.tank_body_positions_snapshot()
         self.update_lives_hud()
         self.update_environment_hud()
         self.assign_lobby_terrain_authority_if_needed()
@@ -4865,6 +4997,7 @@ class MyApp(ShowBase):
             self.set_tank_hit_cooldown(t, 0)
             self.enemy_reset_shot(t)
             self.reset_ai_tank_controller_for_match(t)
+        self.previous_tank_body_positions = self.tank_body_positions_snapshot()
         self.update_lives_hud()
 
     def updatePlayerFeedbackTask(self, task):
@@ -5220,6 +5353,8 @@ class MyApp(ShowBase):
         self.player_collision_shake_started_at = 0
         self.player_damage_event_serial = 0
         self.network_player_damage_event_serial = 0
+        self.player_tank_collision_event_serial = 0
+        self.network_player_tank_collision_event_serial = 0
         self.investigation_mode = False
         self.investigation_available_until = 0
         self.last_player_hit_event = None
@@ -6317,6 +6452,7 @@ class MyApp(ShowBase):
     def mark_player_tank_body_contact(self):
         now = ClockObject.getGlobalClock().getFrameTime()
         self.player_tank_body_contact_damage_block_until = now + PLAYER_TANK_CONTACT_DAMAGE_GRACE_SECONDS
+        self.player_tank_collision_event_serial += 1
 
     def tank_contacts_specific_tank(self, tank_id, other_tank_id, pos=None, padding=0.0, tank_states=None):
         if pos is None:
@@ -6353,12 +6489,12 @@ class MyApp(ShowBase):
             other_radius = self.tank_avatars[other_tank_id].collision_radius
             yield other_tank_id, other_pos, other_radius
 
-    def resolve_tank_collision_position(self, tank_id, pos, body_radius, tank_states=None):
+    def resolve_tank_collision_position(self, tank_id, pos, body_radius, tank_states=None, movement_delta=None):
         resolved = Point3(pos)
         collided = False
         for _ in range(3):
             moved = False
-            for _other_tank_id, other_pos, other_radius in self.other_tank_collision_bodies(tank_id, tank_states):
+            for other_tank_id, other_pos, other_radius in self.other_tank_collision_bodies(tank_id, tank_states):
                 min_dist = body_radius + other_radius + PLAYER_TANK_COLLISION_CONTACT_PADDING
                 dx = resolved[0] - other_pos[0]
                 dy = resolved[1] - other_pos[1]
@@ -6368,17 +6504,17 @@ class MyApp(ShowBase):
 
                 collided = True
                 moved = True
-                if dist_sq < 0.0001:
-                    heading = self.tank_body_heading(tank_id)
-                    dx = math.sin(math.radians(heading))
-                    dy = math.cos(math.radians(heading))
-                    dist = 1.0
-                else:
-                    dist = math.sqrt(dist_sq)
-
+                nx, ny = self.tank_pair_separation_normal(
+                    tank_id,
+                    other_tank_id,
+                    resolved,
+                    other_pos,
+                    movement_delta
+                )
+                dist = math.sqrt(dist_sq) if dist_sq > 0.0001 else 0.0
                 push = min_dist - dist + 0.01
-                resolved[0] += dx / dist * push
-                resolved[1] += dy / dist * push
+                resolved[0] += nx * push
+                resolved[1] += ny * push
             if not moved:
                 break
         return resolved, collided
@@ -6389,6 +6525,7 @@ class MyApp(ShowBase):
         vx = target[0] - start[0]
         vy = target[1] - start[1]
         earliest_t = None
+        initially_overlapped = False
 
         for _other_tank_id, other_pos, other_radius in self.other_tank_collision_bodies(tank_id, tank_states):
             min_dist = body_radius + other_radius + PLAYER_TANK_COLLISION_CONTACT_PADDING
@@ -6400,7 +6537,7 @@ class MyApp(ShowBase):
 
             c = sx * sx + sy * sy - min_dist * min_dist
             if c <= 0:
-                earliest_t = 0.0 if earliest_t is None else min(earliest_t, 0.0)
+                initially_overlapped = True
                 continue
 
             b = 2.0 * (sx * vx + sy * vy)
@@ -6412,13 +6549,31 @@ class MyApp(ShowBase):
             if 0.0 <= entry_t <= 1.0 and (earliest_t is None or entry_t < earliest_t):
                 earliest_t = entry_t
 
+        movement_delta = Point3(vx, vy, 0)
+        if initially_overlapped:
+            resolved, _pushed = self.resolve_tank_collision_position(
+                tank_id,
+                start,
+                body_radius,
+                tank_states,
+                movement_delta
+            )
+            return resolved, True
+
         collided = earliest_t is not None
         if collided:
-            return Point3(start), True
+            safe_t = max(0.0, earliest_t - 0.001)
+            return Point3(start[0] + vx * safe_t, start[1] + vy * safe_t, start[2]), True
 
-        target, pushed = self.resolve_tank_collision_position(tank_id, target, body_radius, tank_states)
+        target, pushed = self.resolve_tank_collision_position(
+            tank_id,
+            target,
+            body_radius,
+            tank_states,
+            movement_delta
+        )
         if pushed:
-            return Point3(start), True
+            return target, True
         return target, False
 
     def set_tank_body_world_pos(self, tank_id, pos):
@@ -6457,17 +6612,9 @@ class MyApp(ShowBase):
                     if dist_sq >= min_dist * min_dist:
                         continue
 
-                    if dist_sq < 0.0001:
-                        heading = self.tank_body_heading(tank_id)
-                        dx = math.sin(math.radians(heading))
-                        dy = math.cos(math.radians(heading))
-                        dist = 1.0
-                    else:
-                        dist = math.sqrt(dist_sq)
-
+                    nx, ny = self.tank_pair_separation_normal(tank_id, other_id, pos, other_pos)
+                    dist = math.sqrt(dist_sq) if dist_sq > 0.0001 else 0.0
                     push = (min_dist - dist + 0.02) * 0.5
-                    nx = dx / dist
-                    ny = dy / dist
                     self.set_tank_body_world_pos(tank_id, Point3(pos[0] + nx * push, pos[1] + ny * push, pos[2]))
                     self.set_tank_body_world_pos(other_id, Point3(other_pos[0] - nx * push, other_pos[1] - ny * push, other_pos[2]))
                     if tank_id == "0" or other_id == "0":
@@ -6994,6 +7141,7 @@ class MyApp(ShowBase):
         if self.game_over:
             return Task.cont
 
+        self.previous_tank_body_positions = self.tank_body_positions_snapshot()
         self.apply_controller_command("0", dt, task.time)
         for t in tanks_list:
             if self.tank_can_run_controller(t):
@@ -7268,12 +7416,12 @@ class MyApp(ShowBase):
         if tank_id == "0":
             self.sight_engaged_np.show()
             self.sight_clear_np.hide()
-        else:
-            self.set_tank_round_collision_enabled(tank_id, True)
-            self.set_tank_shooting(tank_id, True)
 
         shot_np.wrtReparentTo(render)
         shot_np.show()
+        if tank_id != "0":
+            self.set_tank_round_collision_enabled(tank_id, True)
+            self.set_tank_shooting(tank_id, True)
         return Point3(shot_np.getPos(render))
 
     def complete_tank_shot_start(self, tank_id, shot_start, interval, shot_end, shot_deflected, trajectory_points=None):
@@ -7352,6 +7500,7 @@ class MyApp(ShowBase):
         self.set_tank_shot_deflected(tank_id, False)
         if tank_id in tanks_list:
             tanks_dict[tank_id]["shot_trajectory_points"] = []
+            self.set_tank_round_collision_enabled(tank_id, False)
         shot_np = self.tank_shot_node(tank_id)
         shot_np.reparentTo(self.tank_shot_mount_node(tank_id))
         shot_np.setPos(self.tank_shot_stowed_local(tank_id))
@@ -7359,7 +7508,6 @@ class MyApp(ShowBase):
         if tank_id == "0":
             shot_np.hide()
         else:
-            self.set_tank_round_collision_enabled(tank_id, False)
             shot_np.show()
             self.set_tank_shooting(tank_id, False)
 
