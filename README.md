@@ -167,6 +167,18 @@ docker run --rm -it -p 51515:51515/udp mybattlezone-server
 
 The container has an internal IP, but casual clients should not use it.
 
+Build a server ZIP for a LAN host machine:
+
+```powershell
+python .\scripts\package_server.py
+```
+
+or:
+
+```powershell
+.\scripts\package_server.ps1
+```
+
 ## Controls
 
 - Arrow keys: move and turn

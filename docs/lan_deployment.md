@@ -54,6 +54,14 @@ The Docker container has its own internal IP, but that is not the client address
 
 When no human claims remain, the server can hibernate the arena. A later client join wakes it again.
 
+Build a server ZIP for a LAN host machine:
+
+```powershell
+python .\scripts\package_server.py
+```
+
+The output is written to `dist/mybattlezone-server.zip`.
+
 ## Client
 
 Run the client launcher:
