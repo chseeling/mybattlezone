@@ -92,7 +92,7 @@ From a client ZIP, use:
 
 The first-run helper creates `.venv`, installs dependencies, and opens the launcher.
 
-On Raspberry Pi OS Buster, pip may not provide a Panda3D wheel. If `panda3d1.11` is installed with apt, `start_client.sh` uses system Python instead of forcing a venv. It also defaults `BATTLEZONE_AUDIO_FOCUS_MUTE=0`, which avoids Pi window-focus audio muting.
+On Raspberry Pi OS Buster, pip may not provide a Panda3D wheel. If `panda3d1.11` is installed with apt, `start_client.sh` uses system Python instead of forcing a venv. It also defaults `BATTLEZONE_AUDIO_FOCUS_MUTE=0`, `BATTLEZONE_NET_CLIENT_LOW_RENDER_SIZE=640x360`, and `BATTLEZONE_NET_RENDER_DELAY=0.16` for Pi-friendly play over Wi-Fi.
 
 Run a Windows client directly:
 

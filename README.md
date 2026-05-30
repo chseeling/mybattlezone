@@ -113,7 +113,7 @@ or from a client ZIP:
 sh start_client.sh
 ```
 
-On Raspberry Pi OS Buster, `start_client.sh` uses the system Panda3D package when available and disables audio-focus muting by default.
+On Raspberry Pi OS Buster, `start_client.sh` uses the system Panda3D package when available, disables audio-focus muting by default, and uses a smaller low-render window.
 
 The launcher saves the server IP, port, tank, controller, and render mode in `client_config.json`. Use the server PC's LAN IP, for example `192.168.1.42`, not the Docker container IP. The client needs Python and Panda3D; it does not need pygame.
 
