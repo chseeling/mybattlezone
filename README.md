@@ -113,6 +113,8 @@ or from a client ZIP:
 sh start_client.sh
 ```
 
+On Raspberry Pi OS Buster, `start_client.sh` uses the system Panda3D package when available and disables audio-focus muting by default.
+
 The launcher saves the server IP, port, tank, controller, and render mode in `client_config.json`. Use the server PC's LAN IP, for example `192.168.1.42`, not the Docker container IP. The client needs Python and Panda3D; it does not need pygame.
 
 To launch directly from a terminal:
@@ -153,11 +155,8 @@ For Raspberry Pi or Linux:
 
 ```bash
 sudo apt update
-sudo apt install -y python3 python3-venv python3-pip
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install -r requirements.txt
-python -m battlezone.client_launcher --host 192.168.1.42 --tank 0 --low-render --play
+sudo apt install -y python3 python3-venv python3-pip panda3d1.11
+sh start_client.sh --host 192.168.1.42 --tank 0 --low-render --play
 ```
 
 ## Docker Server

@@ -92,6 +92,8 @@ From a client ZIP, use:
 
 The first-run helper creates `.venv`, installs dependencies, and opens the launcher.
 
+On Raspberry Pi OS Buster, pip may not provide a Panda3D wheel. If `panda3d1.11` is installed with apt, `start_client.sh` uses system Python instead of forcing a venv. It also defaults `BATTLEZONE_AUDIO_FOCUS_MUTE=0`, which avoids Pi window-focus audio muting.
+
 Run a Windows client directly:
 
 ```powershell
@@ -102,12 +104,9 @@ Run a Raspberry Pi or Linux client:
 
 ```bash
 sudo apt update
-sudo apt install -y python3 python3-venv python3-pip
+sudo apt install -y python3 python3-venv python3-pip panda3d1.11
 cd ~/mybattlezone
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install -r requirements.txt
-python -m battlezone.client_launcher --host 192.168.1.42 --tank 0 --low-render --play
+sh start_client.sh --host 192.168.1.42 --tank 0 --low-render --play
 ```
 
 Use `--low-render` on slower clients.
@@ -142,7 +141,7 @@ Expected first-run flow:
 
 1. Install Python.
 2. Start `start_client.ps1` on Windows or `sh start_client.sh` on Linux.
-3. Let the helper install dependencies.
+3. Let the helper install dependencies or use system Panda3D on Raspberry Pi OS.
 4. Enter the server PC's LAN IP.
 5. Click Play.
 
