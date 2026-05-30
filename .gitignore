@@ -3,3 +3,5 @@ __pycache__/
 *.py[cod]
 output/
 dist/
+docs/local_doc/
+client_config.json
