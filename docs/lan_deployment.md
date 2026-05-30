@@ -25,7 +25,7 @@ test02.py                current Panda3D game runtime
 - Clients connect to the server machine's LAN IP, for example `192.168.1.42`.
 - If the server runs in Docker, clients still use the host machine's LAN IP, not the container IP.
 - The client needs Python and Panda3D. It does not need pygame.
-- A Logitech Extreme 3D Pro or similar joystick is optional; keyboard controls still work.
+- A Logitech Extreme 3D Pro or similar joystick is optional; keyboard controls still work. The stick moves and turns, the trigger fires, and the thumb hat tilts the sight.
 
 ## Server
 

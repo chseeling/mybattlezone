@@ -214,7 +214,7 @@ python .\scripts\package_all.py
 
 - Arrow keys: move and turn
 - Space, F, Ctrl, or left mouse: fire
-- Logitech Extreme 3D Pro or similar joystick: stick moves and turns, trigger fires
+- Logitech Extreme 3D Pro or similar joystick: stick moves and turns, trigger fires, thumb hat tilts the sight
 - B: toggle GPU bloom
 - D: deploy or recall recon drone
 - I: investigate a recent hit on your tank before the timer expires

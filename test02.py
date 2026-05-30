@@ -202,6 +202,44 @@ JOYSTICK_BARREL_AXES = available_enum_values(
     InputDevice.Axis,
     ("z", "right_y", "throttle"),
 )
+JOYSTICK_BARREL_UP_BUTTONS = [
+    button()
+    for button in (
+        getattr(GamepadButton, "hat_up", None),
+        getattr(GamepadButton, "hatUp", None),
+        getattr(GamepadButton, "dpad_up", None),
+        getattr(GamepadButton, "dpadUp", None),
+    )
+    if button is not None
+]
+JOYSTICK_BARREL_DOWN_BUTTONS = [
+    button()
+    for button in (
+        getattr(GamepadButton, "hat_down", None),
+        getattr(GamepadButton, "hatDown", None),
+        getattr(GamepadButton, "dpad_down", None),
+        getattr(GamepadButton, "dpadDown", None),
+    )
+    if button is not None
+]
+JOYSTICK_NON_FIRE_BUTTONS = set(
+    JOYSTICK_BARREL_UP_BUTTONS +
+    JOYSTICK_BARREL_DOWN_BUTTONS +
+    [
+        button()
+        for button in (
+            getattr(GamepadButton, "hat_left", None),
+            getattr(GamepadButton, "hatLeft", None),
+            getattr(GamepadButton, "hat_right", None),
+            getattr(GamepadButton, "hatRight", None),
+            getattr(GamepadButton, "dpad_left", None),
+            getattr(GamepadButton, "dpadLeft", None),
+            getattr(GamepadButton, "dpad_right", None),
+            getattr(GamepadButton, "dpadRight", None),
+        )
+        if button is not None
+    ]
+)
 JOYSTICK_FIRE_BUTTONS = [
     button()
     for button in (
@@ -1672,9 +1710,23 @@ class MyApp(ShowBase):
             if state.known and state.pressed:
                 return True
         for state in self.joystick_device.buttons:
-            if state.pressed:
+            if state.pressed and state.handle not in JOYSTICK_NON_FIRE_BUTTONS:
                 return True
         return False
+
+    def joystick_button_direction(self, negative_buttons, positive_buttons):
+        if self.joystick_device is None:
+            return 0.0
+        direction = 0.0
+        for button in negative_buttons:
+            state = self.joystick_device.findButton(button)
+            if state.known and state.pressed:
+                direction -= 1.0
+        for button in positive_buttons:
+            state = self.joystick_device.findButton(button)
+            if state.known and state.pressed:
+                direction += 1.0
+        return max(-1.0, min(1.0, direction))
 
     def joystick_tank_command(self):
         if self.joystick_device is None:
@@ -1683,6 +1735,11 @@ class MyApp(ShowBase):
         lateral = self.joystick_axis_value(JOYSTICK_TURN_AXES)
         longitudinal = self.joystick_axis_value(JOYSTICK_THROTTLE_AXES)
         barrel_tilt = self.joystick_axis_value(JOYSTICK_BARREL_AXES)
+        if not barrel_tilt:
+            barrel_tilt = self.joystick_button_direction(
+                JOYSTICK_BARREL_DOWN_BUTTONS,
+                JOYSTICK_BARREL_UP_BUTTONS,
+            )
 
         fire_down = self.joystick_fire_down()
         fire = fire_down and not self.joystick_last_fire_down
