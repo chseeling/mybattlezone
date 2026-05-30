@@ -296,6 +296,7 @@ PROJECTILE_COLLISION_RADIUS = 0.18
 TANK_COLLISION_RADIUS = 1.6
 PLAYER_TANK_COLLISION_RATTLE_COOLDOWN = 0.35
 PLAYER_TANK_COLLISION_CONTACT_PADDING = 0.12
+INCOMING_TANK_SHELL_ARMING_DISTANCE = TANK_COLLISION_RADIUS + PLAYER_NETWORK_HIT_RADIUS + 0.45
 AUTONOMOUS_TANK_MAX_SPEED = 9.0
 AUTONOMOUS_TANK_TURNING_SPEED_FACTOR = 0.45
 PLAYER_CAMERA_HEIGHT = 2.0
@@ -4024,6 +4025,21 @@ class MyApp(ShowBase):
     def player_tank_is_hittable(self):
         return self.tank_is_hittable("0")
 
+    def incoming_player_hit_is_contact_artifact(self, shooter_id, shot_start, shot_end):
+        if shooter_id not in tanks_list:
+            return False
+        if self.tank_contacts_specific_tank(
+                "0",
+                shooter_id,
+                padding=PLAYER_TANK_COLLISION_CONTACT_PADDING + PROJECTILE_COLLISION_RADIUS):
+            return True
+
+        shot_start = Point3(shot_start)
+        shot_end = Point3(shot_end)
+        shot_delta = shot_end - shot_start
+        shot_travel = math.sqrt(shot_delta[0] ** 2 + shot_delta[1] ** 2 + shot_delta[2] ** 2)
+        return shot_travel < INCOMING_TANK_SHELL_ARMING_DISTANCE
+
     def struck(self, entry):
         if self.is_network_client_controller():
             return
@@ -4048,6 +4064,9 @@ class MyApp(ShowBase):
             shot_end = self.tank_shot_node(shooter_id).getPos(render)
         shot_end = Point3(shot_end)
         if not self.enemy_hit_is_low_enough_for_player_tank(shot_end):
+            return
+        if self.incoming_player_hit_is_contact_artifact(shooter_id, shot_start, shot_end):
+            self.enemy_reset_shot(shooter_id)
             return
         if not self.consume_incoming_player_hit(shooter_id, now):
             return
@@ -4088,6 +4107,8 @@ class MyApp(ShowBase):
 
         shot_end = Point3(shot_end)
         if not self.enemy_hit_is_low_enough_for_player_tank(shot_end):
+            return
+        if self.incoming_player_hit_is_contact_artifact(shooter_id, shot_start, shot_end):
             return
         if not self.consume_incoming_player_hit(shooter_id, now):
             return
@@ -6249,6 +6270,20 @@ class MyApp(ShowBase):
             dy = pos[1] - other_pos[1]
             if dx * dx + dy * dy <= min_dist * min_dist:
                 return True
+        return False
+
+    def tank_contacts_specific_tank(self, tank_id, other_tank_id, pos=None, padding=0.0, tank_states=None):
+        if pos is None:
+            pos = self.tank_body_pos(tank_id)
+        pos = Point3(pos)
+        body_radius = self.tank_avatars[tank_id].collision_radius
+        for candidate_id, other_pos, other_radius in self.other_tank_collision_bodies(tank_id, tank_states):
+            if candidate_id != other_tank_id:
+                continue
+            min_dist = body_radius + other_radius + padding
+            dx = pos[0] - other_pos[0]
+            dy = pos[1] - other_pos[1]
+            return dx * dx + dy * dy <= min_dist * min_dist
         return False
 
     def other_tank_collision_bodies(self, tank_id, tank_states=None):
