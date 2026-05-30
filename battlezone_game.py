@@ -940,15 +940,18 @@ class SineAiTankController(TankController):
         if tanks_dict[self.tank_id]["shooting"]:
             return False
 
+        target_tank_id = app.choose_human_target_tank_id(self.tank_id)
+        if target_tank_id is None:
+            return False
+
         aim_jitter = 0.18
-        shoot_at = avatar.node.getRelativePoint(
-            app.camera,
-            (
-                (random() - 0.5) * aim_jitter,
-                (random() - 0.5) * aim_jitter,
-                (random() - 0.5) * aim_jitter
-            )
+        target = app.tank_body_target(target_tank_id)
+        jittered_target = Point3(
+            target[0] + (random() - 0.5) * aim_jitter,
+            target[1] + (random() - 0.5) * aim_jitter,
+            target[2] + (random() - 0.5) * aim_jitter
         )
+        shoot_at = avatar.node.getRelativePoint(render, jittered_target)
         shoot_at = LVecBase2d(shoot_at[0], shoot_at[1]).normalized()
         return shoot_at[0] > 0.99995
 
@@ -1013,7 +1016,7 @@ class TacticalAiTankController(TankController):
             self.aim_acquired_since = None
             self.debug_state = "DOWN"
             return TankCommand()
-        if self.tank_id != "0" and not app.primary_player_target_available():
+        if not app.human_target_available(self.tank_id):
             self.aim_acquired_since = None
             self.debug_state = "WAIT"
             return TankCommand()
@@ -2168,6 +2171,8 @@ class MyApp(ShowBase):
         return self.network_bridge.connected_tank_ids()
 
     def network_claim_metadata_snapshot(self):
+        if self.is_network_client_controller():
+            return getattr(self, "network_claim_metadata", {})
         if self.network_bridge is None or not hasattr(self.network_bridge, "host_claim_snapshot"):
             return {}
         return self.network_bridge.host_claim_snapshot()
@@ -2346,6 +2351,9 @@ class MyApp(ShowBase):
             return "HUMAN SLOT"
         return "AI POOL"
 
+    def tank_team_id(self, tank_id):
+        return "T{}".format(tank_id)
+
     def claim_rows_for_dashboard(self, claims, status_time):
         rows = []
         connected = set(self.network_connected_tank_ids())
@@ -2399,7 +2407,7 @@ class MyApp(ShowBase):
                 state = "ALIVE"
             rows.append({
                 "tank": tank_id,
-                "team": "T{}".format(tank_id),
+                "team": self.tank_team_id(tank_id),
                 "source": self.controller_source_for_tank(tank_id, claims),
                 "lives": lives,
                 "state": state,
@@ -2465,9 +2473,7 @@ class MyApp(ShowBase):
         }
 
     def primary_player_target_available(self):
-        if self.is_network_server_authority():
-            return self.network_tank_client_connected("0")
-        return True
+        return self.human_target_available()
 
     def apply_network_client_low_render_settings(self):
         if not self.is_network_client_low_render():
@@ -3280,6 +3286,9 @@ class MyApp(ShowBase):
         controller = getattr(self, "ai_tank_controllers", {}).get(tank_id)
         debug_state = getattr(controller, "debug_state", "") if controller is not None else ""
         return {
+            "team_id": self.tank_team_id(tank_id),
+            "human_team": self.tank_has_human_controller(tank_id),
+            "controller_source": self.controller_source_for_tank(tank_id),
             "pos": self.point_to_list(body_np.getPos(render)),
             "hpr": self.hpr_to_list(body_np.getHpr(render)),
             "barrel_tilt": self.tank_barrel_tilt(tank_id),
@@ -5558,13 +5567,58 @@ class MyApp(ShowBase):
             return None
         return self.human_control_tank_id
 
-    def tank_has_human_controller(self, tank_id):
+    def tank_has_human_controller(self, tank_id, claims=None):
         tank_id = str(tank_id)
-        claims = self.network_claim_metadata_snapshot() if self.is_network_server_authority() else {}
+        claims = self.network_claim_metadata_snapshot() if claims is None else claims
         claim = claims.get(tank_id, {})
         if str(claim.get("controller", "")).upper() == "HUMAN":
             return True
+        if self.is_network_server_authority():
+            return False
+        if self.is_network_client_controller():
+            if claim:
+                return False
+            return (
+                self.network_current_tank_id() == tank_id and
+                not self.network_client_uses_autonomous_controller()
+            )
         return getattr(self, "human_control_tank_id", "0") == tank_id
+
+    def human_target_tank_ids(self, source_tank_id=None, claims=None):
+        source_tank_id = None if source_tank_id is None else str(source_tank_id)
+        claims = self.network_claim_metadata_snapshot() if claims is None else claims
+        now = ClockObject.getGlobalClock().getFrameTime()
+        target_ids = []
+        for tank_id in self.tank_ids_for_state():
+            if tank_id == source_tank_id:
+                continue
+            if not self.tank_has_human_controller(tank_id, claims):
+                continue
+            if not self.tank_is_hittable(tank_id, now):
+                continue
+            target_ids.append(tank_id)
+
+        if source_tank_id is None or source_tank_id not in self.tank_runtime:
+            return sorted(target_ids, key=lambda value: int(value))
+
+        source_pos = self.tank_body_pos(source_tank_id)
+        return sorted(
+            target_ids,
+            key=lambda value: (
+                self.tank_body_pos(value)[0] - source_pos[0]
+            ) ** 2 + (
+                self.tank_body_pos(value)[1] - source_pos[1]
+            ) ** 2
+        )
+
+    def choose_human_target_tank_id(self, source_tank_id=None):
+        target_ids = self.human_target_tank_ids(source_tank_id)
+        if not target_ids:
+            return None
+        return target_ids[0]
+
+    def human_target_available(self, source_tank_id=None):
+        return self.choose_human_target_tank_id(source_tank_id) is not None
 
     def update_kill_count_hud(self):
         if not hasattr(self, "killCountRoot"):
@@ -7035,9 +7089,13 @@ class MyApp(ShowBase):
     def build_tank_observation(self, tank_id):
         tank_np = self.tank_body_node(tank_id)
         tank_pos = Point3(tank_np.getPos(render))
-        target_tank_id = "0"
-        if tank_id == "0":
-            target_tank_id = sorted(tanks_list, key=lambda value: int(value))[0] if tanks_list else "0"
+        target_tank_id = self.choose_human_target_tank_id(tank_id)
+        if target_tank_id is None:
+            fallback_targets = [
+                candidate_id for candidate_id in self.tank_ids_for_state()
+                if candidate_id != tank_id and self.tank_can_run_controller(candidate_id)
+            ]
+            target_tank_id = fallback_targets[0] if fallback_targets else tank_id
         player_pos = self.tank_body_pos(target_tank_id)
         player_body_pos = self.tank_body_target(target_tank_id)
         player_dx = player_pos[0] - tank_pos[0]
@@ -7055,6 +7113,13 @@ class MyApp(ShowBase):
             "tank_id": tank_id,
             "tank_pos": tank_pos,
             "tank_heading": tank_heading,
+            "target_tank_id": target_tank_id,
+            "target_pos": player_pos,
+            "target_body_pos": player_body_pos,
+            "target_dx": player_dx,
+            "target_dy": player_dy,
+            "distance_to_target": distance,
+            "heading_to_target": heading_to_player,
             "player_pos": player_pos,
             "player_body_pos": player_body_pos,
             "player_dx": player_dx,
