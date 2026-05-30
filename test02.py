@@ -53,7 +53,7 @@ from panda3d.core import AmbientLight
 from panda3d.core import Vec4, Mat4, Point2, Point3, Point4, BitMask32, AudioSound
 from panda3d.core import LineSegs, NodePath, TransparencyAttrib, ColorBlendAttrib, TextNode, ClockObject, CardMaker
 from panda3d.core import Geom, GeomNode, GeomTriangles, GeomVertexData, GeomVertexFormat, GeomVertexWriter
-from panda3d.core import LVecBase4, LVecBase2d, InputDevice, WindowProperties, Camera, PerspectiveLens
+from panda3d.core import LVecBase4, LVecBase2d, InputDevice, GamepadButton, WindowProperties, Camera, PerspectiveLens
 
 from direct.gui.OnscreenText import OnscreenText
 from direct.filter.CommonFilters import CommonFilters
@@ -175,6 +175,42 @@ AUDIO_FOCUS_MUTE_DEFAULT = "0" if (
     NETWORK_CLIENT_CONTROLLER not in {"auto", "autonomous", "ai", "enemy"}
 ) else "1"
 AUDIO_FOCUS_MUTE = env_bool("BATTLEZONE_AUDIO_FOCUS_MUTE", AUDIO_FOCUS_MUTE_DEFAULT == "1")
+
+def available_enum_values(enum_type, names):
+    values = []
+    for name in names:
+        if hasattr(enum_type, name):
+            values.append(getattr(enum_type, name))
+    return values
+
+
+JOYSTICK_ENABLED = env_bool("BATTLEZONE_JOYSTICK_ENABLED", True)
+JOYSTICK_DEADZONE = env_float("BATTLEZONE_JOYSTICK_DEADZONE", 0.16)
+JOYSTICK_DEVICE_CLASSES = available_enum_values(
+    InputDevice.DeviceClass,
+    ("flight_stick", "gamepad", "steering_wheel"),
+)
+JOYSTICK_TURN_AXES = available_enum_values(
+    InputDevice.Axis,
+    ("x", "left_x", "roll", "yaw"),
+)
+JOYSTICK_THROTTLE_AXES = available_enum_values(
+    InputDevice.Axis,
+    ("y", "left_y", "pitch"),
+)
+JOYSTICK_BARREL_AXES = available_enum_values(
+    InputDevice.Axis,
+    ("z", "right_y", "throttle"),
+)
+JOYSTICK_FIRE_BUTTONS = [
+    button()
+    for button in (
+        getattr(GamepadButton, "trigger", None),
+        getattr(GamepadButton, "face_a", None),
+        getattr(GamepadButton, "face_1", None),
+    )
+    if button is not None
+]
 MOUNTAIN_BLOOM_ALPHA = 0.11
 MOUNTAIN_BLOOM_THICKNESS = 7
 MOUNTAIN_HALO_ALPHA = 0.025
@@ -759,11 +795,16 @@ class HumanTankController(TankController):
     def request_fire(self):
         self.fire_requested = True
 
+    def merge_app_input(self, app, command):
+        if hasattr(app, "merge_joystick_command"):
+            return app.merge_joystick_command(command)
+        return command
+
     def command(self, app, avatar, dt, task_time):
         fire = self.fire_requested
         self.fire_requested = False
         if base.mouseWatcherNode is None:
-            return TankCommand(fire=fire)
+            return self.merge_app_input(app, TankCommand(fire=fire))
 
         is_down = base.mouseWatcherNode.is_button_down
         turn = 0.0
@@ -785,7 +826,8 @@ class HumanTankController(TankController):
             if is_down(arrow_forward):
                 throttle += 1.0
 
-        return TankCommand(throttle=throttle, turn=turn, fire=fire, barrel_tilt=barrel_tilt)
+        command = TankCommand(throttle=throttle, turn=turn, fire=fire, barrel_tilt=barrel_tilt)
+        return self.merge_app_input(app, command)
 
 
 class SineAiTankController(TankController):
@@ -1296,6 +1338,8 @@ class MyApp(ShowBase):
         self.investigation_snd.setLoop(True)
         self.audio_focus_enabled = AUDIO_FOCUS_MUTE
         self.audio_has_focus = True
+        self.joystick_device = None
+        self.joystick_last_fire_down = False
         self.sound_base_volumes = {
             self.ambient_snd: 1.0,
             self.mainShot_snd: 1.0,
@@ -1307,12 +1351,7 @@ class MyApp(ShowBase):
         }
         self.apply_audio_focus_volume()
 
-        if DEBUG:
-            device_list = self.devices.getDevices()
-            for device in device_list:
-                print(device.device_class)
-                # if device.device_class == DeviceClass.flight_stick:
-                #    print("Have Joy stick")
+        self.configure_input_devices()
 
         # render.setDepthTest(False)
         self.camLens.setFov(50)
@@ -1534,6 +1573,8 @@ class MyApp(ShowBase):
         for t in sorted(tanks_list):
             self.accept(t, self.set_human_control_tank, extraArgs=[t])
         self.accept('window-event', self.handle_window_event)
+        self.accept('connect-device', self.handle_input_device_connected)
+        self.accept('disconnect-device', self.handle_input_device_disconnected)
 
         self.accept('into-' + 'cmTank', self.struck)
         for t in tanks_list:
@@ -1564,6 +1605,108 @@ class MyApp(ShowBase):
         # mainShot_snd.setLoop(True)
 
         # sfxMgr = base.sfxManagerList[0]
+
+    def configure_input_devices(self):
+        if not JOYSTICK_ENABLED:
+            return
+        self.refresh_joystick_device()
+        if DEBUG:
+            for device in self.devices.getDevices():
+                print("Input device:", device.name, device.device_class)
+
+    def is_joystick_device(self, device):
+        return device.device_class in JOYSTICK_DEVICE_CLASSES
+
+    def joystick_device_priority(self, device):
+        priorities = {
+            device_class: index
+            for index, device_class in enumerate(JOYSTICK_DEVICE_CLASSES)
+        }
+        return priorities.get(device.device_class, 99)
+
+    def refresh_joystick_device(self):
+        previous_device = self.joystick_device
+        devices = [
+            device
+            for device in self.devices.getDevices()
+            if self.is_joystick_device(device)
+        ]
+        devices.sort(key=self.joystick_device_priority)
+        self.joystick_device = devices[0] if devices else None
+        self.joystick_last_fire_down = False
+
+        if self.joystick_device is not None and self.joystick_device is not previous_device:
+            try:
+                self.attachInputDevice(self.joystick_device, prefix="joystick")
+            except Exception as exc:
+                print("Joystick detected but could not be attached:", exc)
+            print("Joystick active:", self.joystick_device.name)
+        elif self.joystick_device is None and previous_device is not None:
+            print("Joystick disconnected")
+
+    def handle_input_device_connected(self, device):
+        if JOYSTICK_ENABLED and self.is_joystick_device(device):
+            self.refresh_joystick_device()
+
+    def handle_input_device_disconnected(self, device):
+        if JOYSTICK_ENABLED and self.is_joystick_device(device):
+            self.refresh_joystick_device()
+
+    def joystick_axis_value(self, axis_ids):
+        if self.joystick_device is None:
+            return 0.0
+        for axis_id in axis_ids:
+            axis = self.joystick_device.findAxis(axis_id)
+            if axis.known:
+                value = max(-1.0, min(1.0, float(axis.value)))
+                if abs(value) < JOYSTICK_DEADZONE:
+                    return 0.0
+                return value
+        return 0.0
+
+    def joystick_fire_down(self):
+        if self.joystick_device is None:
+            return False
+        for button in JOYSTICK_FIRE_BUTTONS:
+            state = self.joystick_device.findButton(button)
+            if state.known and state.pressed:
+                return True
+        for state in self.joystick_device.buttons:
+            if state.pressed:
+                return True
+        return False
+
+    def joystick_tank_command(self):
+        if self.joystick_device is None:
+            return TankCommand()
+
+        lateral = self.joystick_axis_value(JOYSTICK_TURN_AXES)
+        longitudinal = self.joystick_axis_value(JOYSTICK_THROTTLE_AXES)
+        barrel_tilt = self.joystick_axis_value(JOYSTICK_BARREL_AXES)
+
+        fire_down = self.joystick_fire_down()
+        fire = fire_down and not self.joystick_last_fire_down
+        self.joystick_last_fire_down = fire_down
+
+        return TankCommand(
+            throttle=-longitudinal,
+            turn=-lateral,
+            fire=fire,
+            barrel_tilt=barrel_tilt,
+        )
+
+    def merge_joystick_command(self, command):
+        if not JOYSTICK_ENABLED or self.joystick_device is None:
+            return command
+        joystick_command = self.joystick_tank_command()
+        if joystick_command.throttle:
+            command.throttle = joystick_command.throttle
+        if joystick_command.turn:
+            command.turn = joystick_command.turn
+        if joystick_command.barrel_tilt:
+            command.barrel_tilt = joystick_command.barrel_tilt
+        command.fire = command.fire or joystick_command.fire
+        return command
 
     def setup_tank_control_architecture(self):
         self.tank_avatars = {
@@ -1596,7 +1739,7 @@ class MyApp(ShowBase):
 
     def capture_network_human_input(self, bridge):
         if base.mouseWatcherNode is None:
-            return TankCommand()
+            return self.merge_joystick_command(TankCommand())
 
         is_down = base.mouseWatcherNode.is_button_down
         turn = 0.0
@@ -1622,7 +1765,8 @@ class MyApp(ShowBase):
             if is_down(arrow_forward):
                 throttle += 1.0
 
-        return TankCommand(throttle=throttle, turn=turn, fire=fire, barrel_tilt=barrel_tilt)
+        command = TankCommand(throttle=throttle, turn=turn, fire=fire, barrel_tilt=barrel_tilt)
+        return self.merge_joystick_command(command)
 
     def setup_network_controller_prototype(self):
         self.network_bridge = None

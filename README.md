@@ -214,11 +214,14 @@ python .\scripts\package_all.py
 
 - Arrow keys: move and turn
 - Space, F, Ctrl, or left mouse: fire
+- Logitech Extreme 3D Pro or similar joystick: stick moves and turns, trigger fires
 - B: toggle GPU bloom
 - D: deploy or recall recon drone
 - I: investigate a recent hit on your tank before the timer expires
 - R: restart after game over
 - Network lobby: number keys claim tanks, Y marks ready, U marks unready, L releases the current claim, J rejoins after release
+
+Joystick input is enabled by default. Set `BATTLEZONE_JOYSTICK_ENABLED=0` to disable it, or tune the stick center with `BATTLEZONE_JOYSTICK_DEADZONE`, for example `0.22`.
 
 The lower-left HUD radar shows enemy tank positions relative to your current heading. Enemy returns brighten when scanned, then fade like phosphor.
 A stitched HUD panorama shows the forward side views, with a separate rear view below.
