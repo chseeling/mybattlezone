@@ -89,6 +89,12 @@ On Windows you can also run:
 .\play_client.ps1
 ```
 
+From a client ZIP, use the first-run helper to create `.venv`, install Panda3D, and open the launcher:
+
+```powershell
+.\start_client.ps1
+```
+
 On Raspberry Pi or Linux:
 
 ```bash
@@ -99,6 +105,12 @@ or:
 
 ```bash
 sh play_client.sh
+```
+
+or from a client ZIP:
+
+```bash
+sh start_client.sh
 ```
 
 The launcher saves the server IP, port, tank, controller, and render mode in `client_config.json`. Use the server PC's LAN IP, for example `192.168.1.42`, not the Docker container IP. The client needs Python and Panda3D; it does not need pygame.
@@ -116,6 +128,8 @@ battlezone/
 client_launcher.py
 play_client.ps1
 play_client.sh
+start_client.ps1
+start_client.sh
 test02.py
 requirements.txt
 config/
@@ -177,6 +191,18 @@ or:
 
 ```powershell
 .\scripts\package_server.ps1
+```
+
+From a server ZIP, run the direct-host first-run helper:
+
+```powershell
+.\start_server.ps1
+```
+
+On Linux:
+
+```bash
+sh start_server.sh
 ```
 
 Build both client and server ZIPs together:

@@ -15,6 +15,8 @@ CLIENT_PATHS = [
     "client_launcher.py",
     "play_client.ps1",
     "play_client.sh",
+    "start_client.ps1",
+    "start_client.sh",
     "requirements.txt",
     "test02.py",
     "README.md",

@@ -14,6 +14,8 @@ SERVER_PATHS = [
     "sfx",
     "scripts/run_server.ps1",
     "scripts/run_server.sh",
+    "start_server.ps1",
+    "start_server.sh",
     "Dockerfile",
     "requirements.txt",
     "test02.py",

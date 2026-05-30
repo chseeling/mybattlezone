@@ -35,6 +35,14 @@ cd C:\Users\cseel\myProjects\mybattlezone
 python -m battlezone.server --host 0.0.0.0 --port 51515 --ui tui
 ```
 
+From a server ZIP, use:
+
+```powershell
+.\start_server.ps1
+```
+
+The first-run helper creates `.venv`, installs dependencies, and starts the log-mode LAN server on UDP `51515`.
+
 Run the log-mode server for hosted/headless operation:
 
 ```powershell
@@ -76,6 +84,14 @@ Run the client launcher:
 python -m battlezone.client_launcher
 ```
 
+From a client ZIP, use:
+
+```powershell
+.\start_client.ps1
+```
+
+The first-run helper creates `.venv`, installs dependencies, and opens the launcher.
+
 Run a Windows client directly:
 
 ```powershell
@@ -105,6 +121,8 @@ battlezone/
 client_launcher.py
 play_client.ps1
 play_client.sh
+start_client.ps1
+start_client.sh
 test02.py
 requirements.txt
 config/
@@ -123,8 +141,8 @@ The output is written to `dist/mybattlezone-client.zip`.
 Expected first-run flow:
 
 1. Install Python.
-2. Install dependencies with `python -m pip install -r requirements.txt`.
-3. Start `play_client.ps1` on Windows or `sh play_client.sh` on Linux.
+2. Start `start_client.ps1` on Windows or `sh start_client.sh` on Linux.
+3. Let the helper install dependencies.
 4. Enter the server PC's LAN IP.
 5. Click Play.
 
