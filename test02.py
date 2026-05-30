@@ -297,6 +297,7 @@ TANK_COLLISION_RADIUS = 1.6
 PLAYER_TANK_COLLISION_RATTLE_COOLDOWN = 0.35
 PLAYER_TANK_COLLISION_CONTACT_PADDING = 0.12
 INCOMING_TANK_SHELL_ARMING_DISTANCE = TANK_COLLISION_RADIUS + PLAYER_NETWORK_HIT_RADIUS + 0.45
+INCOMING_TANK_SHELL_CLOSE_RANGE_LOCKOUT = TANK_COLLISION_RADIUS + PLAYER_COLLISION_RADIUS + PLAYER_NETWORK_HIT_RADIUS + 0.75
 AUTONOMOUS_TANK_MAX_SPEED = 9.0
 AUTONOMOUS_TANK_TURNING_SPEED_FACTOR = 0.45
 PLAYER_CAMERA_HEIGHT = 2.0
@@ -4025,9 +4026,23 @@ class MyApp(ShowBase):
     def player_tank_is_hittable(self):
         return self.tank_is_hittable("0")
 
+    def tank_xy_distance(self, tank_id, other_tank_id):
+        pos = self.tank_body_pos(tank_id)
+        other_pos = self.tank_body_pos(other_tank_id)
+        dx = pos[0] - other_pos[0]
+        dy = pos[1] - other_pos[1]
+        return math.sqrt(dx * dx + dy * dy)
+
+    def tank_is_too_close_to_player_for_shell_damage(self, tank_id):
+        if tank_id not in tanks_list:
+            return False
+        return self.tank_xy_distance("0", tank_id) <= INCOMING_TANK_SHELL_CLOSE_RANGE_LOCKOUT
+
     def incoming_player_hit_is_contact_artifact(self, shooter_id, shot_start, shot_end):
         if shooter_id not in tanks_list:
             return False
+        if self.tank_is_too_close_to_player_for_shell_damage(shooter_id):
+            return True
         if self.tank_contacts_specific_tank(
                 "0",
                 shooter_id,
@@ -7162,9 +7177,15 @@ class MyApp(ShowBase):
         return shot_end
 
     def fire_enemy_tank(self, t):
+        if self.tank_is_too_close_to_player_for_shell_damage(t):
+            self.set_tank_attack_cooldown(t, TANK_FIRE_COOLDOWN)
+            return
         self.fire_tank(t, self.enemyShot_snd, apply_spread=True)
 
     def fire_remote_tank(self, t):
+        if t in tanks_list and self.tank_is_too_close_to_player_for_shell_damage(t):
+            self.set_tank_attack_cooldown(t, TANK_FIRE_COOLDOWN)
+            return
         self.fire_tank(t, self.mainShot_snd)
 
     def reset_tank_shot(self, tank_id):
