@@ -28,25 +28,32 @@ Or from PowerShell on Windows:
 .\run.ps1
 ```
 
+## Deployment Layout
+
+The deployment entrypoints live under the `battlezone` package:
+
+```text
+battlezone.client          LAN client entrypoint
+battlezone.client_launcher client launcher entrypoint
+battlezone.server          authoritative LAN server entrypoint
+```
+
+`test02.py` remains the legacy game engine entrypoint while the runtime is split into cleaner client/server launch paths.
+
 ## Network Server
 
 Authoritative server with the terminal dashboard:
 
 ```powershell
 cd C:\Users\cseel\myProjects\mybattlezone
-$env:BATTLEZONE_NET_MODE="server"
-$env:BATTLEZONE_SERVER_UI="tui"
-python test02.py
+python -m battlezone.server --ui tui
 ```
 
 Authoritative server with JSON status logs for hosted/headless-style deployment:
 
 ```powershell
 cd C:\Users\cseel\myProjects\mybattlezone
-$env:BATTLEZONE_NET_MODE="server"
-$env:BATTLEZONE_SERVER_UI="logs"
-$env:BATTLEZONE_SERVER_LOG_INTERVAL="5"
-python test02.py
+python -m battlezone.server --ui logs --log-interval 5
 ```
 
 In `tui`, `logs`, `headless`, and `none` server UI modes, the Panda server window is minimized by default. Set `$env:BATTLEZONE_SERVER_WINDOW="visible"` before launch if you want to inspect the server render window.
@@ -55,15 +62,71 @@ Tank 0 human client on the same machine:
 
 ```powershell
 cd C:\Users\cseel\myProjects\mybattlezone
-$env:BATTLEZONE_NET_MODE="client"
-$env:BATTLEZONE_NET_HOST="127.0.0.1"
-$env:BATTLEZONE_NET_TANK="0"
-$env:BATTLEZONE_NET_CONTROLLER="human"
-$env:BATTLEZONE_NET_CLIENT_LOW_RENDER="0"
-python test02.py
+python -m battlezone.client --host 127.0.0.1 --tank 0 --full-render
 ```
 
 Use `BATTLEZONE_NET_HOST="0.0.0.0"` on the server when accepting LAN clients, and use the server machine's LAN IP on the client.
+
+## Client Launcher
+
+For LAN clients, use the launcher instead of setting environment variables by hand:
+
+```powershell
+python -m battlezone.client_launcher
+```
+
+On Windows you can also run:
+
+```powershell
+.\play_client.ps1
+```
+
+On Raspberry Pi or Linux:
+
+```bash
+python3 -m battlezone.client_launcher
+```
+
+or:
+
+```bash
+sh play_client.sh
+```
+
+The launcher saves the server IP, port, tank, controller, and render mode in `client_config.json`. Use the server PC's LAN IP, for example `192.168.1.42`, not the Docker container IP.
+
+To launch directly from a terminal:
+
+```bash
+python3 -m battlezone.client_launcher --host 192.168.1.42 --tank 0 --low-render --play
+```
+
+A client-only ZIP should include:
+
+```text
+battlezone/
+client_launcher.py
+play_client.ps1
+play_client.sh
+test02.py
+requirements.txt
+config/
+models/
+sfx/
+```
+
+## Docker Server
+
+Build and run the log-mode UDP server locally:
+
+```powershell
+cd C:\Users\cseel\myProjects\mybattlezone
+docker build -t mybattlezone-server .
+docker run --rm -it -p 51515:51515/udp `
+  mybattlezone-server
+```
+
+Then run a local client with `$env:BATTLEZONE_NET_HOST="127.0.0.1"`.
 
 ## Controls
 

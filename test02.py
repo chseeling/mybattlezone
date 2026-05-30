@@ -1,13 +1,24 @@
-from panda3d.core import loadPrcFile, AntialiasAttrib, KeyboardButton, CollisionSphere, CollisionNode, CollisionBox, CollisionPolygon
+import os
+
+from panda3d.core import loadPrcFile, loadPrcFileData, AntialiasAttrib, KeyboardButton, CollisionSphere, CollisionNode, CollisionBox, CollisionPolygon
 from panda3d.core import CollisionTraverser, CollisionHandlerEvent
 
 from direct.interval.IntervalGlobal import *
 
 loadPrcFile("config/conf.prc")
 
+_startup_net_mode = os.environ.get("BATTLEZONE_NET_MODE", "").lower()
+_startup_server_ui = os.environ.get("BATTLEZONE_SERVER_UI", "").lower()
+if _startup_net_mode in {"server", "host"} and _startup_server_ui in {"log", "logs", "json", "headless", "none", "off"}:
+    loadPrcFileData("battlezone-headless-server", "\n".join([
+        "audio-library-name null",
+        "notify-level-device fatal",
+        "notify-level-display warning",
+        "notify-output /tmp/panda-notify.log",
+    ]))
+
 import json
 import math
-import os
 import secrets
 import socket
 import time
@@ -999,6 +1010,7 @@ class UdpTankInputBridge:
         self.app.record_server_event("join accepted tank {} {}".format(tank_id, self.client_controller_types.get(tank_id, "CLIENT")))
         if tank_id == "0":
             self.app.return_to_lobby_after_game_over("tank 0 joined")
+        self.app.wake_network_arena_if_hibernating("tank {} joined".format(tank_id))
         self.app.assign_lobby_terrain_authority_if_needed()
         self.send_host_join_ack(addr, tank_id, True, "")
 
@@ -1151,6 +1163,7 @@ class UdpTankInputBridge:
         self.app.clear_remote_control_tank(tank_id)
         self.app.handle_lobby_player_disconnected(player_id)
         self.app.record_server_event("claim {} tank {}".format(reason, tank_id))
+        self.app.hibernate_empty_network_arena("no human claims")
         return True
 
     def handle_host_leave(self, message, addr):
@@ -1405,7 +1418,7 @@ class UdpTankInputBridge:
         ready_count = len([player for player in players if player.get("ready")])
         return {
             "state": self.app.arena_state_label(),
-            "phase": "lobby" if self.app.waiting_to_start else "running",
+            "phase": "hibernate" if self.app.arena_is_hibernating() else ("lobby" if self.app.waiting_to_start else "running"),
             "start_policy": "tank0_required",
             "can_start": self.host_lobby_can_start(),
             "required_tanks": required_tanks,
@@ -2420,6 +2433,7 @@ class MyApp(ShowBase):
         self.server_event_log = []
         self.server_tui_dashboard = None
         self.server_log_last_status_time = -999.0
+        self.arena_hibernating = False
         self.terrain_authority_player_id = ""
         self.terrain_authority_tank_id = ""
 
@@ -2751,6 +2765,7 @@ class MyApp(ShowBase):
         self.network_terrain_authority_player_id = ""
         self.network_terrain_authority_tank_id = ""
         self.network_terrain_locked = False
+        self.network_arena_hibernating = False
         self.network_join_accepted = False
         self.network_join_rejected_reason = ""
         self.network_manual_claim_released = False
@@ -3054,6 +3069,37 @@ class MyApp(ShowBase):
         if self.server_log_enabled():
             self.print_server_log_payload("event", {"message": event})
 
+    def arena_is_hibernating(self):
+        return bool(getattr(self, "arena_hibernating", False))
+
+    def hibernate_empty_network_arena(self, reason="empty"):
+        if not self.is_network_server_authority():
+            return False
+        if self.waiting_to_start or self.game_over or self.arena_is_hibernating():
+            return False
+        if self.network_connected_tank_ids():
+            return False
+
+        self.arena_hibernating = True
+        for tank_id in network_tank_ids():
+            self.submit_remote_tank_input(tank_id, throttle=0.0, turn=0.0, fire=False, barrel_tilt=0.0)
+            self.reset_tank_shot(tank_id)
+        detail = "" if not reason else " ({})".format(reason)
+        self.record_server_event("arena hibernating{}".format(detail))
+        self.update_network_server_presentation()
+        return True
+
+    def wake_network_arena_if_hibernating(self, reason=""):
+        if not self.arena_is_hibernating():
+            return False
+
+        self.arena_hibernating = False
+        detail = "" if not reason else " ({})".format(reason)
+        if self.is_network_server_authority():
+            self.record_server_event("arena woke{}".format(detail))
+        self.update_network_server_presentation()
+        return True
+
     def record_tank_fire_event(self, tank_id, source=None):
         if not self.is_network_server_authority():
             return
@@ -3143,6 +3189,8 @@ class MyApp(ShowBase):
             return "INVESTIGATE"
         if self.game_over:
             return "GAME OVER"
+        if self.arena_is_hibernating():
+            return "HIBERNATING"
         if self.waiting_to_start:
             return "WAITING"
         return "RUNNING"
@@ -3223,9 +3271,10 @@ class MyApp(ShowBase):
         network = self.network_server_status_snapshot()
         status_time = ClockObject.getGlobalClock().getFrameTime()
         connected_tanks = set(self.network_connected_tank_ids())
+        hibernating = self.arena_is_hibernating()
         fallback_active_count = len([
             tank_id for tank_id in CLAIMABLE_TANK_IDS
-            if tank_id != "0" and tank_id not in connected_tanks
+            if not hibernating and tank_id != "0" and tank_id not in connected_tanks
         ])
         human_claim_count = len([
             claim for claim in claims.values()
@@ -3240,7 +3289,7 @@ class MyApp(ShowBase):
                 "uptime": self.format_uptime(),
                 "environment": environment,
                 "terrain_authority": self.terrain_authority_label(),
-                "view": "PREVIEW" if self.waiting_to_start else "LIVE"
+                "view": "HIBERNATE" if hibernating else ("PREVIEW" if self.waiting_to_start else "LIVE")
             },
             "network": {
                 "host": network.get("host", NETWORK_HOST),
@@ -3262,7 +3311,7 @@ class MyApp(ShowBase):
             "autonomy": {
                 "fallback_active_count": fallback_active_count,
                 "human_claim_count": human_claim_count,
-                "enemy_fire": "SUSPENDED" if self.enemy_shooting_suspended else "ENABLED",
+                "enemy_fire": "HIBERNATING" if hibernating else ("SUSPENDED" if self.enemy_shooting_suspended else "ENABLED"),
                 "team_model": "TEAMS OF ONE"
             },
             "lobby": {
@@ -4055,6 +4104,7 @@ class MyApp(ShowBase):
             "environment_index": self.environment_index,
             "waiting_to_start": self.waiting_to_start,
             "game_over": self.game_over,
+            "arena_hibernating": self.arena_is_hibernating(),
             "enemy_shooting_suspended": self.enemy_shooting_suspended,
             "terrain_authority_player_id": self.terrain_authority_player_id,
             "terrain_authority_tank_id": self.terrain_authority_tank_id,
@@ -4100,6 +4150,7 @@ class MyApp(ShowBase):
 
         self.waiting_to_start = bool(snapshot.get("waiting_to_start", False))
         self.game_over = bool(snapshot.get("game_over", False))
+        self.network_arena_hibernating = bool(snapshot.get("arena_hibernating", False))
         self.enemy_shooting_suspended = bool(snapshot.get("enemy_shooting_suspended", self.enemy_shooting_suspended))
         self.update_network_client_audio_state(self.waiting_to_start, self.game_over)
         self.network_connected_tanks = snapshot.get("connected_tanks", [])
@@ -5063,6 +5114,7 @@ class MyApp(ShowBase):
     def end_game(self):
         self.game_over = True
         self.waiting_to_start = False
+        self.arena_hibernating = False
         self.set_tank_alive("0", False)
         self.set_tank_reconstituting("0", False)
         if self.last_player_hit_event:
@@ -5092,6 +5144,7 @@ class MyApp(ShowBase):
             return
 
         self.waiting_to_start = False
+        self.arena_hibernating = False
         if self.is_network_server_authority():
             self.record_server_event("arena started")
         self.camera.setPos(render, self.terrain_position(Point3(0, 0, 0), PLAYER_CAMERA_HEIGHT))
@@ -5511,6 +5564,7 @@ class MyApp(ShowBase):
 
         self.game_over = False
         self.waiting_to_start = True
+        self.arena_hibernating = False
         self.terrain_authority_player_id = ""
         self.terrain_authority_tank_id = ""
         if self.is_network_server_authority():
@@ -5575,6 +5629,7 @@ class MyApp(ShowBase):
             self.investigateTimerRoot.hide()
 
         self.game_over = False
+        self.arena_hibernating = False
         if self.is_network_server_authority():
             self.record_server_event("arena restarted")
         self.last_player_hit_time = -PLAYER_HIT_COOLDOWN
@@ -5955,6 +6010,7 @@ class MyApp(ShowBase):
     def render_player_hud(self):
         self.waiting_to_start = True
         self.game_over = False
+        self.arena_hibernating = False
         self.last_player_hit_time = -PLAYER_HIT_COOLDOWN
         self.reset_incoming_player_hit_consumption()
         self.set_tank_alive("0", True)
@@ -7532,6 +7588,9 @@ class MyApp(ShowBase):
     def updateTankControllersTask(self, task):
         dt = min(ClockObject.getGlobalClock().getDt(), 0.05)
         if self.waiting_to_start:
+            return Task.cont
+
+        if self.arena_is_hibernating():
             return Task.cont
 
         if self.investigation_mode:
