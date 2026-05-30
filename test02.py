@@ -682,6 +682,35 @@ def procedural_home_tank_marker():
     return lines
 
 
+def procedural_side_tank_counter_icon():
+    lines = LineSegs("kill-counter-tank-icon")
+    lines.setThickness(2.2)
+
+    def trace(points, close=True):
+        lines.moveTo(*points[0])
+        for point in points[1:]:
+            lines.drawTo(*point)
+        if close:
+            lines.drawTo(*points[0])
+
+    trace([
+        (-0.08, 0, -0.026), (0.065, 0, -0.026), (0.088, 0, -0.004),
+        (0.074, 0, 0.018), (-0.078, 0, 0.018), (-0.095, 0, -0.004),
+    ])
+    trace([
+        (-0.045, 0, 0.018), (0.032, 0, 0.018), (0.05, 0, 0.044),
+        (-0.022, 0, 0.052), (-0.054, 0, 0.036),
+    ])
+    lines.moveTo(0.044, 0, 0.04)
+    lines.drawTo(0.116, 0, 0.044)
+    for x in (-0.055, -0.018, 0.02, 0.057):
+        trace([
+            (x - 0.009, 0, -0.03), (x + 0.009, 0, -0.03),
+            (x + 0.009, 0, -0.013), (x - 0.009, 0, -0.013),
+        ])
+    return lines
+
+
 def create_structure_faces(kind):
     vertex_format = GeomVertexFormat.getV3()
     vertex_data = GeomVertexData("structure-faces-" + kind, vertex_format, Geom.UHStatic)
@@ -2535,6 +2564,7 @@ class MyApp(ShowBase):
             self.tank_controllers[t] = (
                 self.human_tank_controller if t == tank_id else self.ai_tank_controllers[t]
             )
+        self.update_kill_count_hud()
 
     def set_remote_control_tank(self, tank_id):
         if tank_id not in network_tank_ids():
@@ -2740,6 +2770,7 @@ class MyApp(ShowBase):
                 "alive": True,
                 "reconstituting": False,
                 "lives": self.tank_max_lives(tank_id),
+                "kill_count": 0,
                 "hit_cooldown_until": -PLAYER_HIT_COOLDOWN
             }
         self.incoming_player_hit_consumed_until = {}
@@ -2772,6 +2803,24 @@ class MyApp(ShowBase):
         self.tank_lifecycle_state(tank_id)["lives"] = lives
         if tank_id == "0":
             self.player_lives = int(lives)
+
+    def tank_kill_count(self, tank_id):
+        return int(self.tank_lifecycle_state(tank_id).get("kill_count", 0))
+
+    def set_tank_kill_count(self, tank_id, kill_count):
+        self.tank_lifecycle_state(tank_id)["kill_count"] = max(0, int(kill_count))
+
+    def record_tank_kill(self, shooter_id):
+        shooter_id = str(shooter_id)
+        if shooter_id not in self.tank_lifecycle or not self.tank_has_human_controller(shooter_id):
+            return
+        self.set_tank_kill_count(shooter_id, self.tank_kill_count(shooter_id) + 1)
+        self.update_kill_count_hud()
+
+    def reset_tank_kill_counts(self):
+        for tank_id in self.tank_ids_for_state():
+            self.set_tank_kill_count(tank_id, 0)
+        self.update_kill_count_hud()
 
     def tank_display_name(self, tank_id):
         return "Tank {}".format(tank_id)
@@ -3239,6 +3288,7 @@ class MyApp(ShowBase):
             "alive": lifecycle.get("alive", True),
             "reconstituting": lifecycle.get("reconstituting", False),
             "lives": lifecycle.get("lives"),
+            "kill_count": lifecycle.get("kill_count", 0),
             "debug_state": debug_state
         }
 
@@ -3400,7 +3450,10 @@ class MyApp(ShowBase):
         for tank_id, tank_state in snapshot.get("tanks", {}).items():
             if tank_id in self.tank_lifecycle and tank_state.get("lives") is not None:
                 self.set_tank_lives(tank_id, int(tank_state.get("lives")))
+            if tank_id in self.tank_lifecycle and tank_state.get("kill_count") is not None:
+                self.set_tank_kill_count(tank_id, int(tank_state.get("kill_count")))
         self.update_lives_hud()
+        self.update_kill_count_hud()
         tank_hit_serial = int(snapshot.get("tank_hit_event_serial", 0))
         if not first_snapshot and tank_hit_serial > self.network_tank_hit_event_serial:
             if not self.investigation_mode:
@@ -4468,6 +4521,7 @@ class MyApp(ShowBase):
         self.camera.setHpr(0, 0, 0)
         self.set_player_camera_on_terrain()
         self.reset_incoming_player_hit_consumption()
+        self.reset_tank_kill_counts()
         self.set_tank_alive("0", True)
         self.set_tank_reconstituting("0", False)
         self.set_tank_lives("0", self.tank_max_lives("0"))
@@ -4891,6 +4945,7 @@ class MyApp(ShowBase):
 
         self.last_player_hit_time = -PLAYER_HIT_COOLDOWN
         self.reset_incoming_player_hit_consumption()
+        self.reset_tank_kill_counts()
         self.set_tank_alive("0", True)
         self.set_tank_reconstituting("0", False)
         self.set_tank_lives("0", self.tank_max_lives("0"))
@@ -4955,6 +5010,7 @@ class MyApp(ShowBase):
             self.record_server_event("arena restarted")
         self.last_player_hit_time = -PLAYER_HIT_COOLDOWN
         self.reset_incoming_player_hit_consumption()
+        self.reset_tank_kill_counts()
         self.set_tank_alive("0", True)
         self.set_tank_reconstituting("0", False)
         self.set_tank_lives("0", self.tank_max_lives("0"))
@@ -5407,6 +5463,16 @@ class MyApp(ShowBase):
             self.livesNameTextObjects.append(name_text)
             self.livesValueTextObjects.append(lives_text)
 
+        self.killCountRoot = aspect2d.attachNewNode("KillCount")
+        self.killCountRoot.setPos(-1.18, 0, 0.78)
+        self.killCountIconNp = self.killCountRoot.attachNewNode(procedural_side_tank_counter_icon().create())
+        self.killCountIconNp.setColorScale(0.35, 1.0, 0.35, 1)
+        self.killCountTextObject = OnscreenText(
+            text="0", pos=(0.18, 0), align=TextNode.ALeft,
+            scale=(0.048, 0.07), fg=(0.4, 1.0, 0.4, 1), mayChange=True
+        )
+        self.killCountTextObject.reparentTo(self.killCountRoot)
+
         self.gameOverTextObject = OnscreenText(text="GAME OVER\nR TO RESTART", pos=(0, 0.08),
                                                align=TextNode.ACenter, scale=(0.08, 0.1),
                                                fg=(0.4, 1.0, 0.4, 1), mayChange=True)
@@ -5467,6 +5533,7 @@ class MyApp(ShowBase):
         self.investigateTimerRoot.hide()
 
         self.update_lives_hud()
+        self.update_kill_count_hud()
 
     def update_lives_hud(self):
         rows = self.tank_lives_rows()
@@ -5483,6 +5550,31 @@ class MyApp(ShowBase):
         else:
             self.livesTableRoot.show()
             self.livesTableRoot.setPos(-1.18, 0, -0.62)
+
+    def current_kill_count_tank_id(self):
+        if self.is_network_client_controller():
+            return self.network_current_tank_id()
+        if self.is_network_server_authority():
+            return None
+        return self.human_control_tank_id
+
+    def tank_has_human_controller(self, tank_id):
+        tank_id = str(tank_id)
+        claims = self.network_claim_metadata_snapshot() if self.is_network_server_authority() else {}
+        claim = claims.get(tank_id, {})
+        if str(claim.get("controller", "")).upper() == "HUMAN":
+            return True
+        return getattr(self, "human_control_tank_id", "0") == tank_id
+
+    def update_kill_count_hud(self):
+        if not hasattr(self, "killCountRoot"):
+            return
+        tank_id = self.current_kill_count_tank_id()
+        if tank_id not in self.tank_lifecycle:
+            self.killCountRoot.hide()
+            return
+        self.killCountTextObject.text = str(self.tank_kill_count(tank_id))
+        self.killCountRoot.show()
 
     def render_server_lobby_overlay(self):
         self.serverLobbyDimNp = render2d.attachNewNode("ServerLobbyDim")
@@ -6898,6 +6990,7 @@ class MyApp(ShowBase):
         if not self.tank_is_hittable(tank_id):
             return
 
+        self.record_tank_kill(shooter_id)
         self.record_tank_hit_event(tank_id, shooter_id, shot_start, shot_end, play_local=False)
         self.set_tank_alive(tank_id, False)
         self.set_tank_reconstituting(tank_id, True)
